@@ -1,0 +1,28 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions: { contents: read }
+
+jobs:
+  unit:                       # the Linode API is faked; no token, no machines
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: make vet test
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: every commit is signed off
+        run: |
+          bad=0
+          for c in $(git rev-list ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}); do
+            git log -1 --format=%B "$c" | grep -q '^Signed-off-by: ' || { echo "missing sign-off: $c"; bad=1; }
+          done
+          exit $bad

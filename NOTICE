@@ -1,0 +1,8 @@
+Kevaso provider for Linode
+Copyright 2026 The Kevaso Authors
+
+This product includes software developed by the Kevaso authors (https://kevaso.com).
+
+The node side's BGP announcement (node/) follows Linode's lelastic
+(https://github.com/linode/lelastic, Apache License 2.0): the same route servers, ASNs, timers
+and community.
