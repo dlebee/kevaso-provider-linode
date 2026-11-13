@@ -205,12 +205,12 @@ func haThree(t *testing.T, ctx context.Context, b *bed, k *kit, from, to string)
 	cps := []string{"cp1", "cp2", "cp3"}
 
 	// 1. One system node on etcd, a worker with docker, a container silo.
-	t.Log(c.mustKvoadm(append([]string{"init", "root@" + ms["cp1"].Public, "--kevasod", from, "--name", "cp1", "--cluster", "ha",
+	t.Log(c.mustKvoadm(append([]string{"init", "root@" + ms["cp1"].Public, "--external-ip", ms["cp1"].Public, "--kevasod", from, "--name", "cp1", "--cluster", "ha",
 		"--store", "etcd", "--api-server", "https://" + ms["cp1"].Public + ":6443"}, ssh...)...))
 	if cp := h.hosts()["cp1"].Status.ControlPlane; cp == nil || cp.Store != "etcd" || cp.PeerURL == "" {
 		t.Fatalf("cp1's store: %+v", cp)
 	}
-	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["w1"].Public, "--kevasod", from, "--name", "w1",
+	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["w1"].Public, "--external-ip", ms["w1"].Public, "--kevasod", from, "--name", "w1",
 		"--install", "worker", "--runtime", "docker", "--region", b.region}, ssh...)...))
 	c.mustKvo("apiVersion: kevaso/v1\nkind: Namespace\nmetadata: { name: ha }\n---\n"+h.silo("a"), "apply", "-f", "-")
 	if on := h.running("a", 8*time.Minute); on != "w1" {
@@ -221,7 +221,7 @@ func haThree(t *testing.T, ctx context.Context, b *bed, k *kit, from, to string)
 
 	// 2. Two more system nodes join: all three vote, each serves the API, kvo lists all three.
 	for _, n := range []string{"cp2", "cp3"} {
-		t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms[n].Public, "--kevasod", from, "--name", n, "--install", "control-plane"}, ssh...)...))
+		t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms[n].Public, "--external-ip", ms[n].Public, "--kevasod", from, "--name", n, "--install", "control-plane"}, ssh...)...))
 	}
 	var urls []string
 	eventually(t, "three voters serving the API", 3*time.Minute, func() (bool, string) {
@@ -462,18 +462,18 @@ func haLight(t *testing.T, ctx context.Context, b *bed, k *kit, kevasod string) 
 	c, ms, ssh := h.c, h.ms, b.sshFlags()
 
 	// 7. Started on SQLite, with objects and a worker, then switched to etcd.
-	t.Log(c.mustKvoadm(append([]string{"init", "root@" + ms["m1"].Public, "--kevasod", kevasod, "--name", "m1", "--cluster", "mig",
+	t.Log(c.mustKvoadm(append([]string{"init", "root@" + ms["m1"].Public, "--external-ip", ms["m1"].Public, "--kevasod", kevasod, "--name", "m1", "--cluster", "mig",
 		"--api-server", "https://" + ms["m1"].Public + ":6443"}, ssh...)...))
 	if cp := h.hosts()["m1"].Status.ControlPlane; cp == nil || cp.Store != "sqlite" {
 		t.Fatalf("m1's store: %+v", cp)
 	}
-	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["mw"].Public, "--kevasod", kevasod, "--name", "mw",
+	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["mw"].Public, "--external-ip", ms["mw"].Public, "--kevasod", kevasod, "--name", "mw",
 		"--install", "worker", "--runtime", "docker", "--region", b.region}, ssh...)...))
 	c.mustKvo("apiVersion: kevaso/v1\nkind: Namespace\nmetadata: { name: mig }\n---\n"+h.silo("keep")+"---\n"+h.silo("gone"), "apply", "-f", "-")
 	c.mustKvo("a value kept across the move", "create", "secret", "s1", "-n", "mig", "--from-file", "-")
 	h.running("keep", 8*time.Minute)
 	h.running("gone", 3*time.Minute)
-	if out, err := c.kvoadm(append([]string{"host", "add", "root@" + ms["m2"].Public, "--kevasod", kevasod, "--name", "m2", "--install", "control-plane"}, ssh...)...); err == nil || !strings.Contains(out, "kvoadm store migrate") {
+	if out, err := c.kvoadm(append([]string{"host", "add", "root@" + ms["m2"].Public, "--external-ip", ms["m2"].Public, "--kevasod", kevasod, "--name", "m2", "--install", "control-plane"}, ssh...)...); err == nil || !strings.Contains(out, "kvoadm store migrate") {
 		t.Fatalf("host add --install control-plane on SQLite: want a refusal naming store migrate, got %v\n%s", err, out)
 	}
 	before := h.objects()
@@ -512,8 +512,8 @@ func haLight(t *testing.T, ctx context.Context, b *bed, k *kit, kevasod string) 
 	t.Logf("step 7: all %d objects kept with their UIDs, the secret opens, mw's agent re-listed by itself (fresh started, gone removed)", len(after))
 
 	// 4. Two system nodes and a light one.
-	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["m2"].Public, "--kevasod", kevasod, "--name", "m2", "--install", "control-plane"}, ssh...)...))
-	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["light"].Public, "--kevasod", kevasod, "--name", "light", "--install", "control-plane", "--state-only"}, ssh...)...))
+	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["m2"].Public, "--external-ip", ms["m2"].Public, "--kevasod", kevasod, "--name", "m2", "--install", "control-plane"}, ssh...)...))
+	t.Log(c.mustKvoadm(append([]string{"host", "add", "root@" + ms["light"].Public, "--external-ip", ms["light"].Public, "--kevasod", kevasod, "--name", "light", "--install", "control-plane", "--state-only"}, ssh...)...))
 	eventually(t, "three voters", 3*time.Minute, func() (bool, string) {
 		hs, err := c.hosts()
 		if err != nil {

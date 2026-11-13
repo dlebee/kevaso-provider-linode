@@ -11,9 +11,9 @@ What it serves:
 
 | | Name | What you get |
 |---|---|---|
-| Hosts | | Workers that are Linodes are recognised by address: `kvo describe host` shows the Linode, region and private address |
+| Hosts | | Workers that are Linodes are recognised by their external or internal IP: `kvo describe host` shows the Linode and region, and the Linode's private address becomes the host's internal IP when the operator set none |
 | Load balancer | `linode-nodebalancer` | One NodeBalancer per `IP`, shared by every service on it (by default, all of a namespace's services of the class), a config per port, each to its own service's hosts over the private network. Its address is the balancer's: kept with the `IP` across moves and holders (parked, forwarding nowhere, while nobody holds it), on no host, so a silo can't send from it. Annotations on the `IP` or a service: `linode.kevaso.com/algorithm` (roundrobin, leastconn, source) and `linode.kevaso.com/proxy-protocol` (none, v1, v2); others in that domain are refused |
-| Load balancer | `linode-shared-ip` | Exclusive (one host announces it, so one silo holds it): a reserved IPv4 (`kvo create ip NAME --class linode-shared-ip --region R`), or one you already own (`spec.address`), shared between the region's Linodes and announced by whichever host has the silo, so it follows the silo and the silo can send from it (`egress.source: sameAsService`) |
+| Load balancer | `linode-shared-ip` | Exclusive (one host announces it, so one silo holds it): a reserved IPv4 (`kvo create ip NAME --class linode-shared-ip --region R`), or one you already own (the `IP`'s `spec.address`), shared between the region's Linodes and announced by whichever host has the silo, so it follows the silo and the silo can send from it (`egress.source: sameAsService`) |
 | Storage | `linode-block` | Block Storage, created in the host's region, attached to it, formatted once and mounted for a container silo |
 | DNS | `linode` | Linode DNS records for an IngressClass's host names, and for ACME DNS-01 |
 

@@ -131,9 +131,9 @@ func (c *fleet) leases(t *testing.T) {
 		web, debug  int
 	}
 	silos := []svc{
-		{"api", "{ ports: [debug], max: 2m }", 8080, 9229},
-		{"gated", "{ ports: [debug], max: 5m, approval: { required: true } }", 8081, 9230},
-		{"narrow", `{ ports: [debug], max: 5m, allowFrom: ["203.0.113.0/24"] }`, 8082, 9231},
+		{"api", "lease: { max: 2m }", 8080, 9229},
+		{"gated", "lease: { max: 5m, approval: { required: true } }", 8081, 9230},
+		{"narrow", `lease: { max: 5m }, sources: ["203.0.113.0/24"]`, 8082, 9231},
 	}
 	c.fresh(t, "silo", "api", "gated", "narrow")
 	for _, s := range silos {
@@ -145,10 +145,9 @@ spec:
   image: %s
   resources: { memory: 64Mi }
   command: [python3, -u, -c, %s]
+  ports: [{ name: web, port: %d }, { name: debug, port: %d }]
   service:
-    ports: [{ name: web, port: %d }, { name: debug, port: %d }]
-    expose: hostPort
-    lease: %s
+    ports: [{ port: web, hostPort: [external] }, { port: debug, hostPort: [external], %s }]
 `, s.name, pyImage, pyServer(s.web, s.debug), s.web, s.debug, s.lease))
 	}
 	addr := map[string]string{}
@@ -361,8 +360,8 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	}
 	t.Log("approval required: closed until kvo approve; the asker couldn't answer; a deny kept it closed")
 
-	// lease.allowFrom that leaves this machine out: open, but not to us; the host's rule admits
-	// only that range.
+	// A leased port whose sources leave this machine out: open, but not to us; the host's rule
+	// admits only that range.
 	c.mustKvo(t, "open", "silo", "narrow", "--port", "debug", "--for", "60s")
 	if l := c.lease(t, "narrow", "debug"); l.Status.Phase != "Open" {
 		t.Fatalf("narrow: %+v", l.Status)
@@ -375,7 +374,7 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	staysClosed("narrow", "open, but only from 203.0.113.0/24", 10*time.Second)
 	webUp("narrow open from elsewhere")
 	c.mustKvo(t, "close", "silo", "narrow", "--port", "debug")
-	t.Log("lease.allowFrom without us: open on the host for that range only, closed to us")
+	t.Log("sources without us: open on the host for that range only, closed to us")
 
 	// From inside the silo, through its broker socket: kvo-guest (the kevasod binary under that
 	// name, copied in with kvo cp).

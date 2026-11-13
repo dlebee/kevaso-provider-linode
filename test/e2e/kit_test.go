@@ -148,7 +148,8 @@ type hostView struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
-		Address    string `json:"address"`
+		InternalIP string `json:"internalIP"`
+		ExternalIP string `json:"externalIP"`
 		Components struct {
 			ControlPlane *struct {
 				StateOnly bool `json:"stateOnly"`
