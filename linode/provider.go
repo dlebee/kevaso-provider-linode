@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,12 +47,17 @@ const NodeBalancerSources = "192.168.255.0/24"
 type Config struct {
 	// Tags go on everything it creates, besides "kevaso".
 	Tags []string `json:"tags,omitempty"`
+	// LabelPrefix, if set, replaces the "kvo-" that starts the labels of the volumes and
+	// NodeBalancers it creates, for telling apart what several clusters made in one account.
+	LabelPrefix string `json:"labelPrefix,omitempty"`
 }
 
 // Provider is the Linode provider.
 type Provider struct {
 	API  *linodego.Client
 	Tags []string // on everything created ("kevaso" first)
+	// LabelPrefix replaces "kvo-" at the start of the labels it gives (Config.LabelPrefix).
+	LabelPrefix string
 	// AttachWait and DetachWait are how long one call waits for an attach or detach to finish
 	// before answering kplugin.ErrInProgress (default 20s each). DetachRetry is how long after
 	// asking for a detach it's asked again (one detach hung for over 5 minutes in E032; a second
@@ -70,7 +76,24 @@ func New(token string, cfg Config) *Provider {
 	c.SetToken(token)
 	c.SetUserAgent("kevaso-provider-linode/" + Version)
 	c.SetRetries()
-	return &Provider{API: &c, Tags: append([]string{"kevaso"}, cfg.Tags...)}
+	return &Provider{API: &c, Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix}
+}
+
+// maxLabel is the longest label Linode takes on a volume or a NodeBalancer.
+const maxLabel = 32
+
+// label is what a volume or NodeBalancer named name (from core: "kvo-…", unique by its end) is
+// labelled in Linode: with LabelPrefix instead of "kvo-", cut from the middle to fit so the
+// unique end stays.
+func (p *Provider) label(name string) string {
+	if p.LabelPrefix == "" {
+		return name
+	}
+	rest := strings.TrimPrefix(name, "kvo-")
+	if room := maxLabel - len(p.LabelPrefix); len(rest) > room {
+		rest = rest[len(rest)-max(room, 0):]
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(p.LabelPrefix+strings.TrimLeft(rest, "-_"), "--", "-"), "__", "_")
 }
 
 func (p *Provider) dur(d, def time.Duration) time.Duration {

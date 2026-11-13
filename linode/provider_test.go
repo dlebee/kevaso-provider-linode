@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -292,4 +293,43 @@ func TestBlockIsRegional(t *testing.T) {
 	if len(info.Storage) != 1 || info.Storage[0].Topology != kplugin.TopologyRegion {
 		t.Fatalf("storage classes %+v", info.Storage)
 	}
+}
+
+// A label prefix replaces "kvo-" on what the provider creates, and keeps the unique end when it
+// has to cut.
+func TestLabelPrefix(t *testing.T) {
+	f, p := newFakeAPI(t)
+	p.LabelPrefix = "kvt-wk-a1b2c3-"
+	for name, want := range map[string]string{
+		"kvo-e2e-db-data-abcde":        "kvt-wk-a1b2c3-e2e-db-data-abcde",
+		"kvo-payments-db-data-abcde":   "kvt-wk-a1b2c3-ents-db-data-abcde",
+		"kvo-payments-ledger-db-12345": "kvt-wk-a1b2c3-ts-ledger-db-12345",
+	} {
+		if got := p.label(name); got != want || len(got) > maxLabel {
+			t.Errorf("label(%s) = %s (%d), want %s", name, got, len(got), want)
+		}
+	}
+	st, err := p.EnsureVolume(ctx, kplugin.Volume{Class: ClassBlock, ID: "u/data", Name: "kvo-e2e-db-data-abcde", SizeBytes: 1, Region: "ca-central"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := f.volumes[mustAtoi(t, st.Handle)]["label"]; l != "kvt-wk-a1b2c3-e2e-db-data-abcde" {
+		t.Fatalf("volume label %v", l)
+	}
+	if again, _ := p.EnsureVolume(ctx, kplugin.Volume{Class: ClassBlock, ID: "u/data", Name: "kvo-e2e-db-data-abcde", SizeBytes: 1, Region: "ca-central"}); again.Handle != st.Handle {
+		t.Fatalf("not found again by its prefixed label: %s vs %s", again.Handle, st.Handle)
+	}
+	p.LabelPrefix = ""
+	if got := p.label("kvo-e2e-db-data-abcde"); got != "kvo-e2e-db-data-abcde" {
+		t.Fatalf("no prefix: %s", got)
+	}
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

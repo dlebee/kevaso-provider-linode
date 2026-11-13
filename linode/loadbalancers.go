@@ -38,7 +38,7 @@ func (p *Provider) EnsureLoadBalancer(ctx context.Context, lb kplugin.LoadBalanc
 func (p *Provider) DeleteLoadBalancer(ctx context.Context, ref kplugin.LoadBalancerRef) error {
 	switch ref.Class {
 	case ClassNodeBalancer:
-		nb, err := p.findNodeBalancer(ctx, NodeBalancerLabel(ref.ID))
+		nb, err := p.findNodeBalancer(ctx, p.label(NodeBalancerLabel(ref.ID)))
 		if err != nil {
 			return err
 		}
@@ -88,7 +88,7 @@ func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalanc
 			return kplugin.LoadBalancerStatus{}, fmt.Errorf("port %s has no node port yet", port.Name)
 		}
 	}
-	label := NodeBalancerLabel(lb.ID)
+	label := p.label(NodeBalancerLabel(lb.ID))
 	nb, err := p.findNodeBalancer(ctx, label)
 	if err != nil {
 		return kplugin.LoadBalancerStatus{}, err
