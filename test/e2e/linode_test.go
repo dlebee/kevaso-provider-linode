@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -64,57 +63,21 @@ func TestLinode(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Minute)
 	defer cancel()
-	b := newBed(t, tokenFile)
+	b := newBed(t, tokenFile, "kevaso-e2e-")
 	t.Logf("run tag %s, region %s", b.tag, b.region)
-	b.sweepAtEnd(t)
+	b.cleanupAtEnd(t)
 
 	// Binaries: the CLIs for here, kevasod and the plugin for the Linodes.
-	bin := t.TempDir()
-	build := func(out, pkg, goos string) string {
-		p := filepath.Join(bin, out)
-		cmd := exec.CommandContext(ctx, "go", "build", "-o", p, pkg)
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if goos == "linux" {
-			cmd.Env = append(cmd.Env, "GOOS=linux", "GOARCH=amd64")
-		}
-		if o, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", pkg, err, o)
-		}
-		return p
-	}
-	kvoadm := build("kvoadm", "kevaso.com/core/cmd/kvoadm", runtime.GOOS)
-	kvo := build("kvo", "kevaso.com/core/cmd/kvo", runtime.GOOS)
-	kevasod := build("kevasod", "kevaso.com/core/cmd/kevasod", "linux")
-	plugin := build("kevaso-provider-linode", "kevaso.com/provider-linode/cmd/kevaso-provider-linode", "linux")
-	home := t.TempDir()
-	env := append(os.Environ(), "HOME="+home, "KVO_CONFIG="+filepath.Join(home, ".kevaso", "config.yaml"), "KVO_SERVER=")
-	sh := func(stdin string, name string, args ...string) (string, error) {
-		c := exec.CommandContext(ctx, name, args...)
-		c.Env, c.Stdin = env, strings.NewReader(stdin)
-		out, err := c.CombinedOutput()
-		return string(out), err
-	}
-	must := func(stdin string, name string, args ...string) string {
-		t.Helper()
-		out, err := sh(stdin, name, args...)
-		if err != nil {
-			t.Fatalf("%s %s: %v\n%s", filepath.Base(name), strings.Join(args, " "), err, out)
-		}
-		return out
-	}
-	ssh := []string{"--ssh-key", b.key, "--accept-host-key-on-first-use"}
+	k := newKit(t, ctx)
+	kvoadm, kvo := k.kvoadm, k.kvo
+	kevasod := k.build("kevasod", "kevaso.com/core/cmd/kevasod", "linux", "")
+	plugin := k.build("kevaso-provider-linode", "kevaso.com/provider-linode/cmd/kevaso-provider-linode", "linux", "")
+	cl := k.cluster()
+	env, sh, must := cl.env, cl.run, cl.must
+	ssh := b.sshFlags()
 	eventually := func(what string, d time.Duration, f func() (bool, string)) {
 		t.Helper()
-		deadline, last := time.Now().Add(d), ""
-		for time.Now().Before(deadline) {
-			ok, s := f()
-			if ok {
-				return
-			}
-			last = s
-			time.Sleep(5 * time.Second)
-		}
-		t.Fatalf("%s: not in %v; last: %s", what, d, last)
+		eventually(t, what, d, f)
 	}
 	silo := func(name string) siloStatus {
 		var s siloStatus
@@ -127,22 +90,7 @@ func TestLinode(t *testing.T) {
 
 	// 1. Three Linodes, and a fourth whose IPv4 the shared-IP silo borrows (extra IPv4s need a
 	// support ticket, E031): it runs nothing.
-	type made struct {
-		role string
-		m    machine
-	}
-	ch := make(chan made, 4)
-	for _, role := range []string{"cp", "w1", "w2", "ip"} {
-		go func() { ch <- made{role, b.create(ctx, role)} }()
-	}
-	ms := map[string]machine{}
-	for i := 0; i < 4; i++ {
-		x := <-ch
-		ms[x.role] = x.m
-	}
-	if t.Failed() {
-		t.FailNow()
-	}
+	ms := b.createAll(ctx, "cp", "w1", "w2", "ip")
 	cp, w1, w2, donor := ms["cp"], ms["w1"], ms["w2"], ms["ip"]
 	t.Cleanup(func() { // runs before the sweep: what was going on, if it failed
 		if !t.Failed() {

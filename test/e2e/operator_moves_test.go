@@ -21,7 +21,7 @@ import (
 
 // ── 4. Plugin operators ────────────────────────────────────────────────────────────────────────
 
-func (c *cluster) operator(t *testing.T) {
+func (c *fleet) operator(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	pkg := filepath.Join(filepath.Dir(file), "..", "..", "..", "core", "examples", "operator-session")
 	// On a reused cluster an earlier run may have left the plugin installed (or half: its
@@ -191,7 +191,7 @@ type sample struct {
 	n  int
 }
 
-func (c *cluster) watch(t *testing.T, silo string) *watcher {
+func (c *fleet) watch(t *testing.T, silo string) *watcher {
 	ctx, cancel := context.WithCancel(c.ctx)
 	w := &watcher{samples: map[string][]sample{}, cancel: cancel}
 	for _, name := range []string{"w1", "w2"} {
@@ -274,7 +274,7 @@ func (w *watcher) stop(t *testing.T, from, to string) time.Duration {
 	return firstTo.Sub(lastFrom)
 }
 
-func (c *cluster) moves(t *testing.T) {
+func (c *fleet) moves(t *testing.T) {
 	c.fresh(t, "silo", "roam", "keep", "ha")
 	// A docker silo with nothing local moves anywhere: the old host stops it first.
 	c.apply(t, `apiVersion: kevaso/v1
@@ -410,7 +410,7 @@ spec:
 
 // moveBy moves a silo by hand between two live hosts, watching both: never two copies, and
 // status.movingFrom says the old host is stopping it, then clears.
-func (c *cluster) moveBy(t *testing.T, name, from, to string) {
+func (c *fleet) moveBy(t *testing.T, name, from, to string) {
 	t.Helper()
 	w := c.watch(t, name)
 	time.Sleep(2 * time.Second) // a few samples of before

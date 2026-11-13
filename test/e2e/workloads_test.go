@@ -28,9 +28,9 @@ func TestWorkloads(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Minute)
 	defer cancel()
-	b := newBed(t, tokenFile)
+	b := newBed(t, tokenFile, "kvt-wk-")
 	t.Logf("run tag %s, region %s", b.tag, b.region)
-	b.sweepAtEnd(t)
+	b.cleanupAtEnd(t)
 	start := time.Now()
 	c := newCluster(t, ctx, b)
 	t.Logf("cluster up in %s", time.Since(start).Round(time.Second))
@@ -105,7 +105,7 @@ type lease struct {
 	} `json:"status"`
 }
 
-func (c *cluster) lease(t *testing.T, silo, port string) lease {
+func (c *fleet) lease(t *testing.T, silo, port string) lease {
 	t.Helper()
 	out, err := c.kvoe("get", "leases", "-o", "json")
 	if err != nil {
@@ -125,7 +125,7 @@ func (c *cluster) lease(t *testing.T, silo, port string) lease {
 
 // ── 1. Port leases ─────────────────────────────────────────────────────────────────────────────
 
-func (c *cluster) leases(t *testing.T) {
+func (c *fleet) leases(t *testing.T) {
 	type svc struct {
 		name, lease string
 		web, debug  int
@@ -431,7 +431,7 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 
 // ── 3. Terminals and files ─────────────────────────────────────────────────────────────────────
 
-func (c *cluster) terminals(t *testing.T) {
+func (c *fleet) terminals(t *testing.T) {
 	c.fresh(t, "silo", "term")
 	c.apply(t, `apiVersion: kevaso/v1
 kind: Silo

@@ -33,7 +33,7 @@ type term struct {
 	pos int // how far expect has read
 }
 
-func (c *cluster) startTerm(t *testing.T, rows, cols uint16, args ...string) *term {
+func (c *fleet) startTerm(t *testing.T, rows, cols uint16, args ...string) *term {
 	t.Helper()
 	cmd := c.cmd("", []string{"TERM=xterm-256color"}, c.kvo, args...)
 	cmd.Stdin = nil
@@ -108,7 +108,7 @@ func (tm *term) wait(d time.Duration) int {
 
 // ptyExec: kvo exec -it on a real terminal: its size, a resize, a full-screen program's size
 // (curses), and the command's exit code.
-func (c *cluster) ptyExec(t *testing.T) {
+func (c *fleet) ptyExec(t *testing.T) {
 	tm := c.startTerm(t, 30, 100, "exec", "-it", "silo", "term", "-n", "e2e", "--", "sh")
 	tm.send("stty size | sed 's/^/SZ=/'\n")
 	tm.expect(`SZ=30 100`, 30*time.Second)
@@ -146,7 +146,7 @@ func exitCode(err error) int {
 }
 
 // ptySSH: kvo ssh silo NAME is a login shell on a terminal.
-func (c *cluster) ptySSH(t *testing.T) {
+func (c *fleet) ptySSH(t *testing.T) {
 	tm := c.startTerm(t, 24, 80, "ssh", "silo", "term", "-n", "e2e")
 	tm.send("echo SHELL0=$0; id -u | sed 's/^/UID=/'; stty size | sed 's/^/SZ=/'\n")
 	m := tm.expect(`SHELL0=([^$;\s]\S*)`, 30*time.Second)
@@ -168,7 +168,7 @@ func sum(path string) string {
 }
 
 // copies: kvo cp in and out, a 96 MiB file and a folder.
-func (c *cluster) copies(t *testing.T) {
+func (c *fleet) copies(t *testing.T) {
 	dir := t.TempDir()
 	big := filepath.Join(dir, "big.bin")
 	f, _ := os.Create(big)
@@ -222,7 +222,7 @@ func (c *cluster) copies(t *testing.T) {
 }
 
 // killedClient: a long command whose client is killed is stopped on the host within seconds.
-func (c *cluster) killedClient(t *testing.T, host machine) {
+func (c *fleet) killedClient(t *testing.T, host machine) {
 	for i, tty := range []bool{false, true} {
 		marker := fmt.Sprintf("%d%d", 4000+time.Now().Unix()%1000, i)
 		args := []string{"exec", "silo", "term", "-n", "e2e", "--", "sleep", marker}

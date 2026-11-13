@@ -19,42 +19,13 @@ import (
 // cluster is a control plane and two docker workers on Linodes, installed with kvoadm, with this
 // provider's plugin (controller side on the control plane, node side on the workers), and the
 // CLIs for here.
-type cluster struct {
+type fleet struct {
 	b                            *bed
 	ctx                          context.Context
 	kvo, kvoadm, kevasod, plugin string
 	env                          []string
 	ssh                          []string // kvoadm's SSH flags
 	cp, w1, w2                   machine
-}
-
-// sweepAtEnd deletes everything the bed made when the test ends (unless KEVASO_E2E_KEEP and it
-// failed), and checks nothing tagged is left.
-func (b *bed) sweepAtEnd(t *testing.T) {
-	t.Cleanup(func() {
-		if b.state != "" {
-			t.Logf("KEEPING the cluster in %s (tag %s): KEVASO_E2E_SWEEP=%s go test -tags e2e -run TestSweep deletes it", b.state, b.tag, b.tag)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-		if os.Getenv("KEVASO_E2E_KEEP") != "" && t.Failed() {
-			t.Logf("KEEPING everything tagged %s", b.tag)
-			return
-		}
-		swept := b.sweep(ctx)
-		t.Logf("swept: %s", strings.Join(swept, ", "))
-		for i := 0; i < 20; i++ {
-			left := b.remaining(ctx)
-			if len(left) == 0 {
-				t.Logf("nothing tagged %s is left in the account", b.tag)
-				return
-			}
-			time.Sleep(15 * time.Second)
-			b.sweep(ctx)
-		}
-		t.Errorf("still tagged %s after cleanup: %v", b.tag, b.remaining(ctx))
-	})
 }
 
 // build builds a package for here or for the Linodes.
@@ -74,9 +45,9 @@ func build(t *testing.T, ctx context.Context, dir, out, pkg string, linux bool) 
 	return p
 }
 
-func newCluster(t *testing.T, ctx context.Context, b *bed) *cluster {
+func newCluster(t *testing.T, ctx context.Context, b *bed) *fleet {
 	bin := t.TempDir()
-	c := &cluster{b: b, ctx: ctx,
+	c := &fleet{b: b, ctx: ctx,
 		kvoadm:  build(t, ctx, bin, "kvoadm", "kevaso.com/core/cmd/kvoadm", false),
 		kvo:     build(t, ctx, bin, "kvo", "kevaso.com/core/cmd/kvo", false),
 		kevasod: build(t, ctx, bin, "kevasod", "kevaso.com/core/cmd/kevasod", true),
@@ -121,7 +92,7 @@ func newCluster(t *testing.T, ctx context.Context, b *bed) *cluster {
 }
 
 // diagnoseOnFailure logs, when the test failed, what the hosts and the cluster were doing.
-func (c *cluster) diagnoseOnFailure(t *testing.T) {
+func (c *fleet) diagnoseOnFailure(t *testing.T) {
 	b := c.b
 	t.Cleanup(func() { // runs before the sweep: what was going on, if it failed
 		if !t.Failed() {
@@ -143,7 +114,7 @@ func (c *cluster) diagnoseOnFailure(t *testing.T) {
 }
 
 // install makes the cluster on fresh machines.
-func (c *cluster) install(t *testing.T) {
+func (c *fleet) install(t *testing.T) {
 	b := c.b
 	out := c.must(t, "", c.kvoadm, append([]string{"init", "root@" + c.cp.Public, "--kevasod", c.kevasod, "--name", "cp", "--cluster", "e2e",
 		"--api-server", "https://" + c.cp.Public + ":6443"}, c.ssh...)...)
@@ -184,18 +155,18 @@ func (c *cluster) install(t *testing.T) {
 	c.must(t, "apiVersion: kevaso/v1\nkind: Namespace\nmetadata: { name: e2e }\n", c.kvo, "apply", "-f", "-")
 }
 
-func (c *cluster) cmd(stdin string, extraEnv []string, name string, args ...string) *exec.Cmd {
+func (c *fleet) cmd(stdin string, extraEnv []string, name string, args ...string) *exec.Cmd {
 	x := exec.CommandContext(c.ctx, name, args...)
 	x.Env, x.Stdin = append(append([]string(nil), c.env...), extraEnv...), strings.NewReader(stdin)
 	return x
 }
 
-func (c *cluster) sh(stdin string, name string, args ...string) (string, error) {
+func (c *fleet) sh(stdin string, name string, args ...string) (string, error) {
 	out, err := c.cmd(stdin, nil, name, args...).CombinedOutput()
 	return string(out), err
 }
 
-func (c *cluster) must(t *testing.T, stdin string, name string, args ...string) string {
+func (c *fleet) must(t *testing.T, stdin string, name string, args ...string) string {
 	t.Helper()
 	out, err := c.sh(stdin, name, args...)
 	if err != nil {
@@ -215,21 +186,21 @@ func inE2E(args []string) []string {
 }
 
 // kvoe runs kvo in the e2e namespace.
-func (c *cluster) kvoe(args ...string) (string, error) {
+func (c *fleet) kvoe(args ...string) (string, error) {
 	return c.sh("", c.kvo, inE2E(args)...)
 }
 
-func (c *cluster) mustKvo(t *testing.T, args ...string) string {
+func (c *fleet) mustKvo(t *testing.T, args ...string) string {
 	t.Helper()
 	return c.must(t, "", c.kvo, inE2E(args)...)
 }
 
-func (c *cluster) apply(t *testing.T, yaml string) {
+func (c *fleet) apply(t *testing.T, yaml string) {
 	t.Helper()
 	c.must(t, yaml, c.kvo, "apply", "-n", "e2e", "-f", "-")
 }
 
-func (c *cluster) eventually(t *testing.T, what string, d time.Duration, f func() (bool, string)) {
+func (c *fleet) eventually(t *testing.T, what string, d time.Duration, f func() (bool, string)) {
 	t.Helper()
 	deadline, last := time.Now().Add(d), ""
 	for time.Now().Before(deadline) {
@@ -272,7 +243,7 @@ func (s siloInfo) cond(typ string) (status, reason string) {
 	return "", ""
 }
 
-func (c *cluster) silo(name string) (siloInfo, error) {
+func (c *fleet) silo(name string) (siloInfo, error) {
 	var s siloInfo
 	out, err := c.kvoe("get", "silo", name, "-o", "json")
 	if err != nil {
@@ -282,7 +253,7 @@ func (c *cluster) silo(name string) (siloInfo, error) {
 }
 
 // running waits for a silo to run, and returns it.
-func (c *cluster) running(t *testing.T, name string, d time.Duration) siloInfo {
+func (c *fleet) running(t *testing.T, name string, d time.Duration) siloInfo {
 	t.Helper()
 	var s siloInfo
 	c.eventually(t, name+" running", d, func() (bool, string) {
@@ -293,7 +264,7 @@ func (c *cluster) running(t *testing.T, name string, d time.Duration) siloInfo {
 	return s
 }
 
-func (c *cluster) host(name string) machine {
+func (c *fleet) host(name string) machine {
 	return map[string]machine{"cp": c.cp, "w1": c.w1, "w2": c.w2}[name]
 }
 
@@ -305,7 +276,7 @@ func other(worker string) string {
 }
 
 // fresh deletes what an earlier run on this cluster left (a reused cluster), and waits until it's gone.
-func (c *cluster) fresh(t *testing.T, kind string, names ...string) {
+func (c *fleet) fresh(t *testing.T, kind string, names ...string) {
 	t.Helper()
 	for _, n := range names {
 		if _, err := c.kvoe("get", kind, n); err != nil {
@@ -322,7 +293,7 @@ func (c *cluster) fresh(t *testing.T, kind string, names ...string) {
 
 // redeploy puts this build's kevasod on a reused cluster's hosts (where it differs) and restarts
 // it; silos keep running.
-func (c *cluster) redeploy(t *testing.T) {
+func (c *fleet) redeploy(t *testing.T) {
 	want := sum(c.kevasod)
 	for _, name := range []string{"cp", "w1", "w2"} {
 		m := c.host(name)
