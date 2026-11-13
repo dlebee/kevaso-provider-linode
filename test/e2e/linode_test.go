@@ -66,26 +66,7 @@ func TestLinode(t *testing.T) {
 	defer cancel()
 	b := newBed(t, tokenFile)
 	t.Logf("run tag %s, region %s", b.tag, b.region)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-		if os.Getenv("KEVASO_E2E_KEEP") != "" && t.Failed() {
-			t.Logf("KEEPING everything tagged %s", b.tag)
-			return
-		}
-		swept := b.sweep(ctx)
-		t.Logf("swept: %s", strings.Join(swept, ", "))
-		for i := 0; i < 20; i++ {
-			left := b.remaining(ctx)
-			if len(left) == 0 {
-				t.Logf("nothing tagged %s is left in the account", b.tag)
-				return
-			}
-			time.Sleep(15 * time.Second)
-			b.sweep(ctx)
-		}
-		t.Errorf("still tagged %s after cleanup: %v", b.tag, b.remaining(ctx))
-	})
+	b.sweepAtEnd(t)
 
 	// Binaries: the CLIs for here, kevasod and the plugin for the Linodes.
 	bin := t.TempDir()
@@ -198,7 +179,7 @@ func TestLinode(t *testing.T) {
 
 	// 3. The plugin: controller side on the control plane (with the token), node side on the workers.
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
-	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q]}`, b.tag)), 0o644)
+	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.tag, b.tag+"-")), 0o644)
 	t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin,
 		"--credential", "token=" + tokenFile, "--config", cfgFile}, ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")

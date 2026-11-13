@@ -5,6 +5,7 @@ go 1.27
 toolchain go1.27.4
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/linode/linodego v1.69.1
 	github.com/osrg/gobgp/v3 v3.37.0
 	golang.org/x/crypto v0.58.0
