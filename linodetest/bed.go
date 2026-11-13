@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func NewBed(t testing.TB, tokenFile, prefix string) *Bed {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyFile := filepath.Join(t.TempDir(), "id_ed25519")
+	keyFile := filepath.Join(keepDir(t), "id_ed25519")
 	if err := os.WriteFile(keyFile, pem.EncodeToMemory(blk), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +63,20 @@ func NewBed(t testing.TB, tokenFile, prefix string) *Bed {
 	}
 	return &Bed{T: t, API: c, Tag: prefix + hex.EncodeToString(run), Region: region, Key: keyFile,
 		Pub: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp)))}
+}
+
+// keepDir is a folder of the run's: removed after it, unless KEVASO_E2E_KEEP keeps the machines
+// (then their key and kvo's config stay too, to look at them).
+func keepDir(t testing.TB) string {
+	if os.Getenv("KEVASO_E2E_KEEP") == "" {
+		return t.TempDir()
+	}
+	d, err := os.MkdirTemp("", "kevaso-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("KEVASO_E2E_KEEP: this run's key and config are in %s", d)
+	return d
 }
 
 // Client is a Linode API client with the token in tokenFile.
@@ -125,6 +140,9 @@ func (b *Bed) CreateType(ctx context.Context, role, plan string) Machine {
 		}
 		time.Sleep(5 * time.Second)
 	}
+	// A fresh public address is scanned from the internet at once: sshd's default MaxStartups
+	// (10:30:100) then drops a share of new connections, kvoadm's among them.
+	_, _ = b.SSH(ctx, m, "echo 'MaxStartups 200:30:400' > /etc/ssh/sshd_config.d/90-kevaso-e2e.conf && systemctl reload ssh")
 	// First boot runs apt on its own: let it finish before kvoadm installs anything.
 	_, _ = b.SSH(ctx, m, "systemctl stop unattended-upgrades apt-daily.timer apt-daily-upgrade.timer 2>/dev/null; "+
 		"for i in $(seq 120); do fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done")
@@ -137,12 +155,30 @@ func (b *Bed) SSH(ctx context.Context, m Machine, cmd string) (string, error) {
 }
 
 // SSHIn runs cmd as root on m with stdin (secrets go this way, never on a command line).
+// Connections reset before the SSH handshake (some Linode addresses, seen from some networks)
+// ran nothing on the machine, so they're tried again, up to 6 times.
 func (b *Bed) SSHIn(ctx context.Context, m Machine, stdin, cmd string) (string, error) {
-	c := exec.CommandContext(ctx, "ssh", "-i", b.Key, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "LogLevel=ERROR", "root@"+m.Public, cmd)
-	c.Stdin = strings.NewReader(stdin)
-	out, err := c.CombinedOutput()
-	return string(out), err
+	for try := 1; ; try++ {
+		c := exec.CommandContext(ctx, "ssh", "-i", b.Key, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+			"-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "LogLevel=ERROR", "root@"+m.Public, cmd)
+		c.Stdin = strings.NewReader(stdin)
+		out, err := c.CombinedOutput()
+		if err != nil && try < 6 && c.ProcessState != nil && c.ProcessState.ExitCode() == 255 && preHandshake(string(out)) {
+			time.Sleep(time.Duration(try) * 3 * time.Second)
+			continue
+		}
+		return string(out), err
+	}
+}
+
+// preHandshake says ssh's output is a connection that failed before anything ran.
+func preHandshake(out string) bool {
+	for _, s := range []string{"kex_exchange_identification", "Connection reset by peer", "Connection closed by remote host", "Connection timed out during banner exchange"} {
+		if strings.Contains(out, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // MustSSH is SSH that fails the test on an error.
@@ -155,9 +191,18 @@ func (b *Bed) MustSSH(ctx context.Context, m Machine, cmd string) string {
 	return out
 }
 
-// Sweep deletes everything carrying the bed's tag, and says what it found.
+// Sweep deletes everything carrying the bed's tag, and every Linode labelled with it (a tag filter
+// can miss a Linode the API has only just made), and says what it found.
 func (b *Bed) Sweep(ctx context.Context) (left []string) {
-	return SweepTag(ctx, b.API, b.Tag)
+	left = SweepTag(ctx, b.API, b.Tag)
+	ins, _ := LabelsWithPrefix(ctx, b.API, b.Tag+"-")
+	for _, in := range ins {
+		if !slices.Contains(left, "Linode "+in.Label) {
+			left = append(left, "Linode "+in.Label)
+		}
+		_ = b.API.DeleteInstance(ctx, in.ID)
+	}
+	return left
 }
 
 // SweepTag deletes every resource tagged tag (Linodes, volumes, NodeBalancers, domains); a token
@@ -202,6 +247,15 @@ func (b *Bed) Remaining(ctx context.Context) []string {
 	ins, _ := b.API.ListInstances(ctx, tagged)
 	for _, in := range ins {
 		out = append(out, "Linode "+in.Label)
+	}
+	labelled, err := LabelsWithPrefix(ctx, b.API, b.Tag+"-")
+	if err != nil {
+		out = append(out, "Linodes unknown: "+err.Error())
+	}
+	for _, in := range labelled {
+		if !slices.Contains(out, "Linode "+in.Label) {
+			out = append(out, "Linode "+in.Label)
+		}
 	}
 	vols, _ := b.API.ListVolumes(ctx, tagged)
 	for _, v := range vols {

@@ -34,7 +34,7 @@ func NewCluster(ctx context.Context, t testing.TB, b *Bed) *Cluster {
 	c.Kvoadm = c.Build("kvoadm", "kevaso.com/core/cmd/kvoadm", runtime.GOOS)
 	c.Kvo = c.Build("kvo", "kevaso.com/core/cmd/kvo", runtime.GOOS)
 	c.Kevasod = c.Build("kevasod", "kevaso.com/core/cmd/kevasod", "linux")
-	home := t.TempDir()
+	home := keepDir(t)
 	c.Env = append(os.Environ(), "HOME="+home, "KVO_CONFIG="+filepath.Join(home, ".kevaso", "config.yaml"), "KVO_SERVER=")
 	c.SSHArgs = []string{"--ssh-key", b.Key, "--accept-host-key-on-first-use"}
 	return c
@@ -107,7 +107,7 @@ func (c *Cluster) Get(v any, kind, name, ns string) bool {
 // Init runs kvoadm init on cp (cluster e2e) and checks a recovery key was printed.
 func (c *Cluster) Init(cp Machine, name string) {
 	c.T.Helper()
-	out := c.Must("", c.Kvoadm, append([]string{"init", "root@" + cp.Public, "--kevasod", c.Kevasod, "--name", name, "--cluster", "e2e",
+	out := c.mustConnect(c.Kvoadm, append([]string{"init", "root@" + cp.Public, "--kevasod", c.Kevasod, "--name", name, "--cluster", "e2e",
 		"--api-server", "https://" + cp.Public + ":6443"}, c.SSHArgs...)...)
 	if !regexp.MustCompile(`KVR1-`).MatchString(out) {
 		c.T.Fatalf("no recovery key printed:\n%s", out)
@@ -117,14 +117,32 @@ func (c *Cluster) Init(cp Machine, name string) {
 // AddWorker runs kvoadm host add for a worker with runtime rt (docker, podman).
 func (c *Cluster) AddWorker(m Machine, name, rt string) {
 	c.T.Helper()
-	c.T.Log(c.Must("", c.Kvoadm, append([]string{"host", "add", "root@" + m.Public, "--kevasod", c.Kevasod, "--name", name,
+	c.T.Log(c.mustConnect(c.Kvoadm, append([]string{"host", "add", "root@" + m.Public, "--kevasod", c.Kevasod, "--name", name,
 		"--install", "worker", "--runtime", rt, "--region", c.Bed.Region}, c.SSHArgs...)...))
+}
+
+// mustConnect is Must, tried again (8 times in all) when kvoadm couldn't even connect: a fresh
+// Linode's sshd sometimes resets connections, before anything happened on it.
+func (c *Cluster) mustConnect(name string, args ...string) string {
+	c.T.Helper()
+	for try := 1; ; try++ {
+		out, err := c.Sh("", name, args...)
+		if err == nil {
+			return out
+		}
+		if try < 8 && strings.Contains(out, "couldn't read the host key") {
+			c.T.Logf("%s: %s; again", filepath.Base(name), firstLine(out))
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		c.T.Fatalf("%s %s: %v\n%s", filepath.Base(name), strings.Join(args, " "), err, out)
+	}
 }
 
 // PluginInstall runs kvoadm plugin install on m with extra flags (--name, --binary, …).
 func (c *Cluster) PluginInstall(m Machine, args ...string) string {
 	c.T.Helper()
-	out := c.Must("", c.Kvoadm, append(append([]string{"plugin", "install", "root@" + m.Public}, args...), c.SSHArgs...)...)
+	out := c.mustConnect(c.Kvoadm, append(append([]string{"plugin", "install", "root@" + m.Public}, args...), c.SSHArgs...)...)
 	c.T.Log(out)
 	return out
 }
