@@ -13,7 +13,7 @@ import (
 	"kevaso.com/core/sdk/kplugin"
 )
 
-// NodeBalancerLabel is the NodeBalancer's label for a silo: found again by it (labels are unique in
+// NodeBalancerLabel is the NodeBalancer's label for an IP (by its UID): found again by it (labels are unique in
 // an account; 32 characters at most).
 func NodeBalancerLabel(id string) string {
 	l := "kvo-" + strings.ReplaceAll(id, "-", "")
@@ -27,6 +27,9 @@ func NodeBalancerLabel(id string) string {
 func (p *Provider) EnsureLoadBalancer(ctx context.Context, lb kplugin.LoadBalancer) (kplugin.LoadBalancerStatus, error) {
 	switch lb.Class {
 	case ClassNodeBalancer:
+		if len(lb.Backends) == 0 && len(lb.Ports) == 0 {
+			return p.parkNodeBalancer(ctx, lb) // nobody holds its IP: keep the address, send nowhere
+		}
 		return p.ensureNodeBalancer(ctx, lb)
 	case ClassSharedIP:
 		return p.ensureSharedIP(ctx, lb)
@@ -38,7 +41,7 @@ func (p *Provider) EnsureLoadBalancer(ctx context.Context, lb kplugin.LoadBalanc
 func (p *Provider) DeleteLoadBalancer(ctx context.Context, ref kplugin.LoadBalancerRef) error {
 	switch ref.Class {
 	case ClassNodeBalancer:
-		nb, err := p.findNodeBalancer(ctx, NodeBalancerLabel(ref.ID))
+		nb, err := p.findNodeBalancer(ctx, p.label(NodeBalancerLabel(ref.ID)))
 		if err != nil {
 			return err
 		}
@@ -65,12 +68,50 @@ func (p *Provider) findNodeBalancer(ctx context.Context, label string) (*linodeg
 	return nil, nil
 }
 
+// Annotations the NodeBalancer class reads, on the IP (every port) or a service (its ports).
+const (
+	AnnotationAlgorithm     = "linode.kevaso.com/algorithm"      // roundrobin (default) | leastconn | source
+	AnnotationProxyProtocol = "linode.kevaso.com/proxy-protocol" // none (default) | v1 | v2
+)
+
+// portKnobs are a port's NodeBalancer settings: the IP's annotations, then its service's.
+func portKnobs(lb kplugin.LoadBalancer, port kplugin.Port) (linodego.ConfigAlgorithm, linodego.ConfigProxyProtocol, error) {
+	algo, proxy := linodego.AlgorithmRoundRobin, linodego.ProxyProtocolNone
+	for _, m := range []map[string]string{lb.Annotations, port.Annotations} {
+		for k, v := range m {
+			switch k {
+			case AnnotationAlgorithm:
+				switch a := linodego.ConfigAlgorithm(v); a {
+				case linodego.AlgorithmRoundRobin, linodego.AlgorithmLeastConn, linodego.AlgorithmSource:
+					algo = a
+				default:
+					return "", "", fmt.Errorf("%s: %q: want roundrobin, leastconn or source", k, v)
+				}
+			case AnnotationProxyProtocol:
+				switch pp := linodego.ConfigProxyProtocol(v); pp {
+				case linodego.ProxyProtocolNone, linodego.ProxyProtocolV1, linodego.ProxyProtocolV2:
+					proxy = pp
+				default:
+					return "", "", fmt.Errorf("%s: %q: want none, v1 or v2", k, v)
+				}
+			default:
+				if strings.HasPrefix(k, "linode.kevaso.com/") {
+					return "", "", fmt.Errorf("unknown annotation %s (a NodeBalancer reads %s and %s): %w", k, AnnotationAlgorithm, AnnotationProxyProtocol, kplugin.ErrUnsupported)
+				}
+			}
+		}
+	}
+	return algo, proxy, nil
+}
+
+// ensureNodeBalancer: one NodeBalancer per IP (lb.ID), a config per port, each port to its own
+// service's hosts on its node port, over the region's private network. Several services share it
+// when they share the IP; the address never changes while the IP lives.
 func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalancer) (kplugin.LoadBalancerStatus, error) {
 	if len(lb.Backends) == 0 {
-		return kplugin.LoadBalancerStatus{}, fmt.Errorf("NodeBalancer for %s/%s: no backend host", lb.Namespace, lb.Name)
+		return kplugin.LoadBalancerStatus{}, fmt.Errorf("NodeBalancer for IP %s/%s: no backend host", lb.Namespace, lb.Name)
 	}
 	region := lb.Backends[0].Region
-	var nodes []linodego.NodeBalancerNodeCreateOptions
 	for _, b := range lb.Backends {
 		if b.Region != region {
 			return kplugin.LoadBalancerStatus{}, fmt.Errorf("NodeBalancer backends span %s and %s: a NodeBalancer reaches one region", region, b.Region)
@@ -78,30 +119,37 @@ func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalanc
 		if b.PrivateAddress == "" {
 			return kplugin.LoadBalancerStatus{}, fmt.Errorf("host %s (Linode %s) has no private IPv4: a NodeBalancer reaches hosts over the private network (add one in Cloud Manager, then reboot the Linode)", b.Name, b.ID)
 		}
-		nodes = append(nodes, linodego.NodeBalancerNodeCreateOptions{Label: b.Name, Weight: 100, Mode: linodego.ModeAccept})
 	}
+	seen := map[int]string{}
 	for _, port := range lb.Ports {
 		if !strings.EqualFold(port.Protocol, "TCP") && port.Protocol != "" {
-			return kplugin.LoadBalancerStatus{}, fmt.Errorf("port %s: %s NodeBalancers forward TCP here (UDP: use %s)", port.Name, port.Protocol, ClassSharedIP)
+			return kplugin.LoadBalancerStatus{}, fmt.Errorf("port %s of %s: %s NodeBalancers forward TCP here (UDP: use %s)", port.Name, port.Service, port.Protocol, ClassSharedIP)
 		}
 		if port.NodePort == 0 {
 			return kplugin.LoadBalancerStatus{}, fmt.Errorf("port %s has no node port yet", port.Name)
 		}
+		if who, dup := seen[port.Port]; dup {
+			return kplugin.LoadBalancerStatus{}, fmt.Errorf("port %d is %s's and %s's: one NodeBalancer port each", port.Port, who, port.Service)
+		}
+		seen[port.Port] = port.Service
+		if _, _, err := portKnobs(lb, port); err != nil {
+			return kplugin.LoadBalancerStatus{}, err
+		}
 	}
-	label := NodeBalancerLabel(lb.ID)
+	label := p.label(NodeBalancerLabel(lb.ID))
 	nb, err := p.findNodeBalancer(ctx, label)
 	if err != nil {
 		return kplugin.LoadBalancerStatus{}, err
 	}
 	if nb == nil {
 		nb, err = p.API.CreateNodeBalancer(ctx, linodego.NodeBalancerCreateOptions{Label: &label, Region: region,
-			Tags: append(append([]string(nil), p.Tags...), "kevaso-silo:"+lb.Namespace+"/"+lb.Name)})
+			Tags: append(append([]string(nil), p.Tags...), "kevaso-ip:"+lb.Namespace+"/"+lb.Name)})
 		if err != nil {
 			return kplugin.LoadBalancerStatus{}, apiErr("create NodeBalancer "+label, err)
 		}
 	}
 	if nb.Region != region {
-		return kplugin.LoadBalancerStatus{}, fmt.Errorf("NodeBalancer %s is in %s; the silo's host is in %s", label, nb.Region, region)
+		return kplugin.LoadBalancerStatus{}, fmt.Errorf("NodeBalancer %s is in %s; the hosts are in %s", label, nb.Region, region)
 	}
 	cfgs, err := p.API.ListNodeBalancerConfigs(ctx, nb.ID, nil)
 	if err != nil {
@@ -114,20 +162,21 @@ func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalanc
 	want := map[int]bool{}
 	for _, port := range lb.Ports {
 		want[port.Port] = true
-		ns := make([]linodego.NodeBalancerNodeCreateOptions, len(nodes))
-		for i, n := range nodes {
-			n.Address = lb.Backends[i].PrivateAddress + ":" + strconv.Itoa(port.NodePort)
-			ns[i] = n
+		algo, proxy, _ := portKnobs(lb, port)
+		backends := port.Backends
+		if len(backends) == 0 {
+			backends = lb.Backends
 		}
-		opts := linodego.NodeBalancerConfigRebuildOptions{Port: port.Port, Protocol: linodego.ProtocolTCP,
-			Algorithm: linodego.AlgorithmRoundRobin, Check: linodego.CheckConnection, CheckInterval: 5, CheckTimeout: 3, CheckAttempts: 2}
-		for _, n := range ns {
-			opts.Nodes = append(opts.Nodes, linodego.NodeBalancerConfigRebuildNodeOptions{NodeBalancerNodeCreateOptions: n})
+		opts := linodego.NodeBalancerConfigRebuildOptions{Port: port.Port, Protocol: linodego.ProtocolTCP, ProxyProtocol: proxy,
+			Algorithm: algo, Check: linodego.CheckConnection, CheckInterval: 5, CheckTimeout: 3, CheckAttempts: 2}
+		for _, b := range backends {
+			opts.Nodes = append(opts.Nodes, linodego.NodeBalancerConfigRebuildNodeOptions{NodeBalancerNodeCreateOptions: linodego.NodeBalancerNodeCreateOptions{
+				Label: b.Name, Weight: 100, Mode: linodego.ModeAccept, Address: b.PrivateAddress + ":" + strconv.Itoa(port.NodePort)}})
 		}
 		c, ok := byPort[port.Port]
 		if !ok {
 			created, err := p.API.CreateNodeBalancerConfig(ctx, nb.ID, linodego.NodeBalancerConfigCreateOptions{Port: port.Port,
-				Protocol: linodego.ProtocolTCP, Algorithm: linodego.AlgorithmRoundRobin, Check: linodego.CheckConnection,
+				Protocol: linodego.ProtocolTCP, ProxyProtocol: proxy, Algorithm: algo, Check: linodego.CheckConnection,
 				CheckInterval: 5, CheckTimeout: 3, CheckAttempts: 2})
 			if err != nil {
 				return kplugin.LoadBalancerStatus{}, apiErr(fmt.Sprintf("NodeBalancer %s port %d", label, port.Port), err)
@@ -151,12 +200,13 @@ func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalanc
 	return kplugin.LoadBalancerStatus{Address: *nb.IPv4, SourceRanges: []string{NodeBalancerSources}}, nil
 }
 
-// ensureSharedIP shares lb.Address (an IPv4 of a Linode in the account, in the hosts' region) with
-// every Linode host in that region, so whichever of them has the silo can announce it.
+// ensureSharedIP shares lb.Address (the IP's address: reserved, or already the account's, in the
+// hosts' region) with every Linode host in that region, so whichever of them has the silo can
+// announce it. A reserved address no Linode has yet is assigned to the silo's host first.
 func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) (kplugin.LoadBalancerStatus, error) {
 	addr, err := netip.ParseAddr(lb.Address)
 	if err != nil || !addr.Is4() {
-		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s needs loadBalancer.address: an IPv4 of a Linode in your account (extra IPv4s are asked for through Linode support)", ClassSharedIP)
+		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s needs its IP's address (an IP object of class %s, reserved in a region, or one with spec.address you already own)", ClassSharedIP, ClassSharedIP)
 	}
 	ip, err := p.API.GetIPAddress(ctx, addr.String())
 	if err != nil {
@@ -168,6 +218,10 @@ func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) 
 	if b := lb.Backends[0]; b.Region != ip.Region {
 		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s is in %s; the silo's host %s is in %s: put the silo in %s (placement.hostSelector or region)", addr, ip.Region, b.Name, b.Region, ip.Region)
 	}
+	owner, err := p.assignIfUnassigned(ctx, ip, lb.Backends[0])
+	if err != nil {
+		return kplugin.LoadBalancerStatus{}, err
+	}
 	for _, h := range lb.Hosts {
 		if h.Region != ip.Region {
 			continue
@@ -176,7 +230,7 @@ func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) 
 		if err != nil {
 			return kplugin.LoadBalancerStatus{}, err
 		}
-		if id == ip.LinodeID {
+		if id == owner {
 			continue // its own address
 		}
 		if err := p.setShared(ctx, id, func(cur []string) []string {

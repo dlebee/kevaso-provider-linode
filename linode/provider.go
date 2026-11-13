@@ -2,10 +2,11 @@
 // Linode API token and serves, over the plugin protocol (kevaso.com/core/sdk/kplugin):
 //
 //   - hosts: which cluster hosts are Linodes (by address), their region and private address;
-//   - load-balancer class linode-nodebalancer: a NodeBalancer per silo, sending each port to the
-//     silo's host on a node port, over the region's private network;
-//   - load-balancer class linode-shared-ip: an IPv4 you own, shared with every Linode host in its
-//     region and announced over BGP by whichever host has the silo (research E031);
+//   - load-balancer class linode-nodebalancer: a NodeBalancer per IP, shared by the services on it,
+//     sending each port to its service's hosts on a node port, over the region's private network;
+//   - load-balancer class linode-shared-ip (exclusive: one host announces it): a reserved IPv4 (or one you already own), shared with
+//     every Linode host in its region and announced over BGP by whichever host has the silo
+//     (research E031); it is reserved and released apart from any silo (core's IP objects);
 //   - storage class linode-block: Block Storage volumes, attached to the silo's host; a detach can
 //     hang, so it's started, polled for a while, and asked again later (E032);
 //   - DNS provider linode: records in Linode DNS Manager, for Ingress host names and DNS-01.
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,12 +48,17 @@ const NodeBalancerSources = "192.168.255.0/24"
 type Config struct {
 	// Tags go on everything it creates, besides "kevaso".
 	Tags []string `json:"tags,omitempty"`
+	// LabelPrefix, if set, replaces the "kvo-" that starts the labels of the volumes and
+	// NodeBalancers it creates, for telling apart what several clusters made in one account.
+	LabelPrefix string `json:"labelPrefix,omitempty"`
 }
 
 // Provider is the Linode provider.
 type Provider struct {
 	API  *linodego.Client
 	Tags []string // on everything created ("kevaso" first)
+	// LabelPrefix replaces "kvo-" at the start of the labels it gives (Config.LabelPrefix).
+	LabelPrefix string
 	// AttachWait and DetachWait are how long one call waits for an attach or detach to finish
 	// before answering kplugin.ErrInProgress (default 20s each). DetachRetry is how long after
 	// asking for a detach it's asked again (one detach hung for over 5 minutes in E032; a second
@@ -60,8 +67,10 @@ type Provider struct {
 
 	mu        sync.Mutex
 	detaching map[int]time.Time // volume → when its detach was last asked for
-	instances []linodego.Instance
-	listed    time.Time
+	// reservedFor: the addresses reserved for each IP (by its UID), so asking again is idempotent.
+	reservedFor map[string]kplugin.AddressStatus
+	instances   []linodego.Instance
+	listed      time.Time
 }
 
 // New returns a provider using token.
@@ -70,7 +79,24 @@ func New(token string, cfg Config) *Provider {
 	c.SetToken(token)
 	c.SetUserAgent("kevaso-provider-linode/" + Version)
 	c.SetRetries()
-	return &Provider{API: &c, Tags: append([]string{"kevaso"}, cfg.Tags...)}
+	return &Provider{API: &c, Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix}
+}
+
+// maxLabel is the longest label Linode takes on a volume or a NodeBalancer.
+const maxLabel = 32
+
+// label is what a volume or NodeBalancer named name (from core: "kvo-…", unique by its end) is
+// labelled in Linode: with LabelPrefix instead of "kvo-", cut from the middle to fit so the
+// unique end stays.
+func (p *Provider) label(name string) string {
+	if p.LabelPrefix == "" {
+		return name
+	}
+	rest := strings.TrimPrefix(name, "kvo-")
+	if room := maxLabel - len(p.LabelPrefix); len(rest) > room {
+		rest = rest[len(rest)-max(room, 0):]
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(p.LabelPrefix+strings.TrimLeft(rest, "-_"), "--", "-"), "__", "_")
 }
 
 func (p *Provider) dur(d, def time.Duration) time.Duration {
@@ -84,14 +110,21 @@ func (p *Provider) dur(d, def time.Duration) time.Duration {
 func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 	return kplugin.Info{Name: "linode", Version: Version, Protocol: kplugin.Protocol, Hosts: true,
 		LoadBalancers: []kplugin.Class{
-			{Name: ClassNodeBalancer, Description: "a Linode NodeBalancer, to the silo's host over the private network", OwnHostsOnly: true, NodePorts: true},
-			{Name: ClassSharedIP, Description: "an IPv4 you own, shared between the region's Linodes, announced over BGP by the silo's host", OwnHostsOnly: true, Announce: true},
+			// Its address is the NodeBalancer's: on no host, so nothing sends from it, and no
+			// reservation apart from the balancer (the IP keeps the balancer instead). Shared: one
+			// NodeBalancer carries every service on the IP, a config per port.
+			{Name: ClassNodeBalancer, Description: "a Linode NodeBalancer, to the silo's host over the private network", OwnHostsOnly: true, NodePorts: true,
+				Follows: kplugin.FollowsRegion},
+			// A reserved IPv4, shared between the region's Linodes and announced by the silo's host:
+			// it follows the silo in its region, and the silo can send from it.
+			{Name: ClassSharedIP, Description: "a reserved IPv4, shared between the region's Linodes, announced over BGP by the silo's host", OwnHostsOnly: true, Announce: true,
+				Reserve: true, SendsFrom: true, Exclusive: true, Follows: kplugin.FollowsRegion},
 		},
 		// Regional: a volume detaches and attaches to any Linode in its region, so a silo on it
 		// can move within the region (design §0.3).
 		Storage: []kplugin.Class{{Name: ClassBlock, Description: "Linode Block Storage, attached to the silo's host", OwnHostsOnly: true,
 			Topology: kplugin.TopologyRegion}},
-		DNS:     []string{DNSName}}, nil
+		DNS: []string{DNSName}}, nil
 }
 
 // instancesNow lists the account's Linodes (cached for 30 s: describing many hosts is one call).

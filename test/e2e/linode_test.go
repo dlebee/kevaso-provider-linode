@@ -30,8 +30,6 @@ import (
 	"time"
 
 	"github.com/linode/linodego"
-
-	"kevaso.com/provider-linode/linodetest"
 )
 
 type siloStatus struct {
@@ -65,25 +63,34 @@ func TestLinode(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Minute)
 	defer cancel()
-	b := linodetest.NewBed(t, tokenFile, "kevaso-e2e-")
-	b.Tags = []string{"kevaso-e2e"}
-	t.Logf("run tag %s, region %s", b.Tag, b.Region)
-	b.CleanUp()
+	b := newBed(t, tokenFile, "kevaso-e2e-")
+	t.Logf("run tag %s, region %s", b.tag, b.region)
+	b.cleanupAtEnd(t)
 
 	// Binaries: the CLIs for here, kevasod and the plugin for the Linodes.
-	cl := linodetest.NewCluster(ctx, t, b)
-	kvoadm, kvo, kevasod := cl.Kvoadm, cl.Kvo, cl.Kevasod
-	plugin := cl.Build("kevaso-provider-linode", "kevaso.com/provider-linode/cmd/kevaso-provider-linode", "linux")
-	env, sh, must, eventually, ssh := cl.Env, cl.Sh, cl.Must, cl.Eventually, cl.SSHArgs
+	k := newKit(t, ctx)
+	kvoadm, kvo := k.kvoadm, k.kvo
+	kevasod := k.build("kevasod", "kevaso.com/core/cmd/kevasod", "linux", "")
+	plugin := k.build("kevaso-provider-linode", "kevaso.com/provider-linode/cmd/kevaso-provider-linode", "linux", "")
+	cl := k.cluster()
+	env, sh, must := cl.env, cl.run, cl.must
+	ssh := b.sshFlags()
+	eventually := func(what string, d time.Duration, f func() (bool, string)) {
+		t.Helper()
+		eventually(t, what, d, f)
+	}
 	silo := func(name string) siloStatus {
 		var s siloStatus
-		cl.Get(&s, "silo", name, "e2e")
+		out, err := sh("", kvo, "get", "silo", name, "-n", "e2e", "-o", "json")
+		if err == nil {
+			_ = json.Unmarshal([]byte(out), &s)
+		}
 		return s
 	}
 
 	// 1. Three Linodes, and a fourth whose IPv4 the shared-IP silo borrows (extra IPv4s need a
 	// support ticket, E031): it runs nothing.
-	ms := b.Parallel(ctx, nil, "cp", "w1", "w2", "ip")
+	ms := b.createAll(ctx, "cp", "w1", "w2", "ip")
 	cp, w1, w2, donor := ms["cp"], ms["w1"], ms["w2"], ms["ip"]
 	t.Cleanup(func() { // runs before the sweep: what was going on, if it failed
 		if !t.Failed() {
@@ -91,8 +98,8 @@ func TestLinode(t *testing.T) {
 		}
 		dctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		for name, m := range map[string]linodetest.Machine{"cp": cp, "w1": w1, "w2": w2} {
-			out, _ := b.SSH(dctx, m, "ls -la /run/kevaso-plugins/ /run/kevaso-plugins/* 2>&1; systemctl --no-pager status kevaso-plugin-linode 2>&1 | head -5; "+
+		for name, m := range map[string]machine{"cp": cp, "w1": w1, "w2": w2} {
+			out, _ := b.ssh(dctx, m, "ls -la /run/kevaso-plugins/ /run/kevaso-plugins/* 2>&1; systemctl --no-pager status kevaso-plugin-linode 2>&1 | head -5; "+
 				"journalctl -u kevaso-plugin-linode -n 30 --no-pager 2>&1; journalctl -u kevasod -n 60 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -40")
 			t.Logf("── %s ──\n%s", name, out)
 		}
@@ -112,28 +119,28 @@ func TestLinode(t *testing.T) {
 	}
 	for _, w := range []struct {
 		name string
-		m    linodetest.Machine
+		m    machine
 	}{{"w1", w1}, {"w2", w2}} {
 		t.Log(must("", kvoadm, append([]string{"host", "add", "root@" + w.m.Public, "--kevasod", kevasod, "--name", w.name,
-			"--install", "worker", "--runtime", "docker", "--region", b.Region}, ssh...)...))
+			"--install", "worker", "--runtime", "docker", "--region", b.region}, ssh...)...))
 	}
 
 	// 3. The plugin: controller side on the control plane (with the token), node side on the workers.
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
-	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q]}`, b.Tag)), 0o644)
+	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.tag, b.tag+"-")), 0o644)
 	t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin,
 		"--credential", "token=" + tokenFile, "--config", cfgFile}, ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
-	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
-	for _, w := range []linodetest.Machine{w1, w2} {
+	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.region)), 0o644)
+	for _, w := range []machine{w1, w2} {
 		t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", plugin,
 			"--side", "node", "--config", nodeCfg}, ssh...)...))
 	}
 	// The token is on the control plane only, readable by root only.
-	if out, _ := b.SSH(ctx, cp, "stat -c '%a %U' /etc/kevaso/plugins/linode/token"); strings.TrimSpace(out) != "600 root" {
+	if out, _ := b.ssh(ctx, cp, "stat -c '%a %U' /etc/kevaso/plugins/linode/token"); strings.TrimSpace(out) != "600 root" {
 		t.Fatalf("token file: %q", out)
 	}
-	if out, _ := b.SSH(ctx, w1, "ls /etc/kevaso/plugins/linode/"); strings.Contains(out, "token") {
+	if out, _ := b.ssh(ctx, w1, "ls /etc/kevaso/plugins/linode/"); strings.Contains(out, "token") {
 		t.Fatal("a worker got the token")
 	}
 	eventually("the workers recognised as Linodes", 3*time.Minute, func() (bool, string) {
@@ -158,10 +165,10 @@ func TestLinode(t *testing.T) {
 
 	// 4. A container silo with a Block Storage volume behind a NodeBalancer, and an Ingress class
 	// publishing its host name in Linode DNS.
-	zone := b.Tag + ".kevaso.com"
+	zone := b.tag + ".kevaso.com"
 	dns := true
-	if _, err := b.API.CreateDomain(ctx, linodego.DomainCreateOptions{Domain: zone, Type: linodego.DomainTypeMaster,
-		SOAEmail: "hostmaster@kevaso.com", Tags: []string{b.Tag}}); err != nil {
+	if _, err := b.api.CreateDomain(ctx, linodego.DomainCreateOptions{Domain: zone, Type: linodego.DomainTypeMaster,
+		SOAEmail: "hostmaster@kevaso.com", Tags: []string{b.tag}}); err != nil {
 		var le *linodego.Error
 		if !errors.As(err, &le) || (le.Code != 401 && le.Code != 403) {
 			t.Fatalf("test zone: %v", err)
@@ -170,7 +177,7 @@ func TestLinode(t *testing.T) {
 		t.Logf("SKIPPING the DNS part: this token can't use Domains (%v); give it Domains read/write to test it", err)
 	}
 	nb := true
-	if _, err := b.API.ListNodeBalancers(ctx, nil); err != nil {
+	if _, err := b.api.ListNodeBalancers(ctx, nil); err != nil {
 		var le *linodego.Error
 		if !errors.As(err, &le) || (le.Code != 401 && le.Code != 403) {
 			t.Fatalf("NodeBalancers: %v", err)
@@ -235,8 +242,8 @@ spec:
 		return ok, fmt.Sprintf("%+v", web.Status)
 	})
 	t.Logf("web on %s, NodeBalancer %s, volume %s at %s", web.Status.Host, web.Status.Service.PublicIP, web.Status.Volumes[0].Handle, web.Status.Volumes[0].Device)
-	host := map[string]linodetest.Machine{"w1": w1, "w2": w2}[web.Status.Host]
-	if out, _ := b.SSH(ctx, host, "findmnt -n -o SOURCE,FSTYPE /var/lib/kevaso/volumes/"+web.Metadata.UID+"/site"); !strings.Contains(out, "ext4") {
+	host := map[string]machine{"w1": w1, "w2": w2}[web.Status.Host]
+	if out, _ := b.ssh(ctx, host, "findmnt -n -o SOURCE,FSTYPE /var/lib/kevaso/volumes/"+web.Metadata.UID+"/site"); !strings.Contains(out, "ext4") {
 		t.Fatalf("volume mount on %s: %q", web.Status.Host, out)
 	}
 	if got := must("", kvo, "exec", "silo", "web", "-n", "e2e", "--", "cat", "/usr/share/nginx/html/index.html"); !strings.Contains(got, "served from a Linode volume") {
@@ -248,7 +255,7 @@ spec:
 	}
 	if dns {
 		eventually("shop."+zone+" in Linode DNS", 20*time.Minute, func() (bool, string) {
-			addrs, err := linodetest.Lookup(ctx, "shop."+zone)
+			addrs, err := lookup(ctx, "shop."+zone)
 			return err == nil && len(addrs) == 1 && addrs[0] == web.Status.Service.PublicIP, fmt.Sprint(addrs, err)
 		})
 		t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.PublicIP)
@@ -259,7 +266,7 @@ spec:
 	must("", kvo, "delete", "silo", "web", "-n", "e2e")
 	eventually("web, its NodeBalancer, volume and record gone", 10*time.Minute, func() (bool, string) {
 		_, err := sh("", kvo, "get", "silo", "web", "-n", "e2e")
-		left := b.Remaining(ctx)
+		left := b.remaining(ctx)
 		var cloud []string
 		for _, l := range left {
 			if !strings.HasPrefix(l, "Linode ") && !strings.HasPrefix(l, "domain ") {
@@ -267,10 +274,10 @@ spec:
 			}
 		}
 		recs := 0
-		if ds, _ := b.API.ListDomains(ctx, nil); len(ds) > 0 {
+		if ds, _ := b.api.ListDomains(ctx, nil); len(ds) > 0 {
 			for _, d := range ds {
 				if d.Domain == zone {
-					rs, _ := b.API.ListDomainRecords(ctx, d.ID, nil)
+					rs, _ := b.api.ListDomainRecords(ctx, d.ID, nil)
 					for _, r := range rs {
 						if r.Type == linodego.RecordTypeA || r.Type == linodego.RecordTypeTXT {
 							recs++
@@ -290,9 +297,15 @@ spec:
 		t.Log("deleting the silo detached and deleted its volume")
 	}
 
-	// 6. A shared IP that follows its silo: the donor's IPv4, announced over BGP by the silo's host;
-	// that host goes down, the silo is recreated on the other one, and the address answers there.
+	// 6. A shared IP that follows its silo: the donor's IPv4 (an IP object adopting it, kept), announced
+	// over BGP by the silo's host; that host goes down, the silo is recreated on the other one, and the
+	// address answers there.
 	must(`apiVersion: kevaso/v1
+kind: IP
+metadata: { name: edge, namespace: e2e }
+spec: { class: linode-shared-ip, address: `+donor.Public+` }
+---
+apiVersion: kevaso/v1
 kind: Silo
 metadata: { name: edge, namespace: e2e }
 spec:
@@ -304,7 +317,7 @@ spec:
   service:
     ports: [{ name: http, port: 80 }]
     expose: loadBalancer
-    loadBalancer: { class: linode-shared-ip, address: `+donor.Public+` }
+    loadBalancer: { class: linode-shared-ip, ip: edge }
 `, kvo, "apply", "-f", "-")
 	var edge siloStatus
 	eventually("edge running on the shared IP", 8*time.Minute, func() (bool, string) {
@@ -317,8 +330,8 @@ spec:
 		return strings.Contains(body, "edge answers"), fmt.Sprint(body, err)
 	})
 	t.Logf("%s answers from edge on %s (announced over BGP)", donor.Public, first)
-	down := map[string]linodetest.Machine{"w1": w1, "w2": w2}[first]
-	if err := b.API.ShutdownInstance(ctx, down.ID); err != nil {
+	down := map[string]machine{"w1": w1, "w2": w2}[first]
+	if err := b.api.ShutdownInstance(ctx, down.ID); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("%s shut down", first)
@@ -334,7 +347,7 @@ spec:
 	t.Logf("%s answers again, from edge on %s, %s after %s went down", donor.Public, edge.Status.Host, time.Since(start).Round(time.Second), first)
 	must("", kvo, "delete", "silo", "edge", "-n", "e2e")
 	eventually("edge's shares removed", 5*time.Minute, func() (bool, string) {
-		ips, err := b.API.GetInstanceIPAddresses(ctx, map[string]linodetest.Machine{"w1": w1, "w2": w2}[edge.Status.Host].ID)
+		ips, err := b.api.GetInstanceIPAddresses(ctx, map[string]machine{"w1": w1, "w2": w2}[edge.Status.Host].ID)
 		if err != nil || ips.IPv4 == nil {
 			return false, fmt.Sprint(err)
 		}
@@ -342,7 +355,7 @@ spec:
 	})
 }
 
-func testNodeBalancer(t *testing.T, web siloStatus, host linodetest.Machine, eventually func(string, time.Duration, func() (bool, string))) {
+func testNodeBalancer(t *testing.T, web siloStatus, host machine, eventually func(string, time.Duration, func() (bool, string))) {
 	t.Helper()
 	eventually("the page through the NodeBalancer", 5*time.Minute, func() (bool, string) {
 		body, err := get("http://" + web.Status.Service.PublicIP + "/")

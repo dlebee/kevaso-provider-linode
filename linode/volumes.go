@@ -38,21 +38,22 @@ func (p *Provider) EnsureVolume(ctx context.Context, v kplugin.Volume) (kplugin.
 	if v.Region == "" {
 		return kplugin.VolumeStatus{}, fmt.Errorf("volume %s: no region", v.Name)
 	}
-	found, err := p.API.ListVolumes(ctx, filter(map[string]any{"label": v.Name}))
+	label := p.label(v.Name)
+	found, err := p.API.ListVolumes(ctx, filter(map[string]any{"label": label}))
 	if err != nil {
 		return kplugin.VolumeStatus{}, apiErr("list volumes", err)
 	}
 	for _, x := range found {
-		if x.Label == v.Name {
+		if x.Label == label {
 			if x.Region != v.Region {
 				return kplugin.VolumeStatus{}, fmt.Errorf("volume %s exists in %s, not %s", v.Name, x.Region, v.Region)
 			}
 			return kplugin.VolumeStatus{Handle: strconv.Itoa(x.ID), Region: x.Region, SizeBytes: int64(x.Size) << 30}, nil
 		}
 	}
-	x, err := p.API.CreateVolume(ctx, linodego.VolumeCreateOptions{Label: v.Name, Region: v.Region, Size: gib(v.SizeBytes), Tags: p.Tags})
+	x, err := p.API.CreateVolume(ctx, linodego.VolumeCreateOptions{Label: label, Region: v.Region, Size: gib(v.SizeBytes), Tags: p.Tags})
 	if err != nil {
-		return kplugin.VolumeStatus{}, apiErr("create volume "+v.Name, err)
+		return kplugin.VolumeStatus{}, apiErr("create volume "+label, err)
 	}
 	return kplugin.VolumeStatus{Handle: strconv.Itoa(x.ID), Region: x.Region, SizeBytes: int64(x.Size) << 30}, nil
 }
