@@ -2,9 +2,9 @@
 // Linode API token and serves, over the plugin protocol (kevaso.com/core/sdk/kplugin):
 //
 //   - hosts: which cluster hosts are Linodes (by address), their region and private address;
-//   - load-balancer class linode-nodebalancer: a NodeBalancer per silo, sending each port to the
-//     silo's host on a node port, over the region's private network;
-//   - load-balancer class linode-shared-ip: a reserved IPv4 (or one you already own), shared with
+//   - load-balancer class linode-nodebalancer: a NodeBalancer per IP, shared by the services on it,
+//     sending each port to its service's hosts on a node port, over the region's private network;
+//   - load-balancer class linode-shared-ip (exclusive: one host announces it): a reserved IPv4 (or one you already own), shared with
 //     every Linode host in its region and announced over BGP by whichever host has the silo
 //     (research E031); it is reserved and released apart from any silo (core's IP objects);
 //   - storage class linode-block: Block Storage volumes, attached to the silo's host; a detach can
@@ -111,13 +111,14 @@ func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 	return kplugin.Info{Name: "linode", Version: Version, Protocol: kplugin.Protocol, Hosts: true,
 		LoadBalancers: []kplugin.Class{
 			// Its address is the NodeBalancer's: on no host, so nothing sends from it, and no
-			// reservation apart from the balancer (the IP keeps the balancer instead).
+			// reservation apart from the balancer (the IP keeps the balancer instead). Shared: one
+			// NodeBalancer carries every service on the IP, a config per port.
 			{Name: ClassNodeBalancer, Description: "a Linode NodeBalancer, to the silo's host over the private network", OwnHostsOnly: true, NodePorts: true,
 				Follows: kplugin.FollowsRegion},
 			// A reserved IPv4, shared between the region's Linodes and announced by the silo's host:
 			// it follows the silo in its region, and the silo can send from it.
 			{Name: ClassSharedIP, Description: "a reserved IPv4, shared between the region's Linodes, announced over BGP by the silo's host", OwnHostsOnly: true, Announce: true,
-				Reserve: true, SendsFrom: true, Follows: kplugin.FollowsRegion},
+				Reserve: true, SendsFrom: true, Exclusive: true, Follows: kplugin.FollowsRegion},
 		},
 		// Regional: a volume detaches and attaches to any Linode in its region, so a silo on it
 		// can move within the region (design §0.3).

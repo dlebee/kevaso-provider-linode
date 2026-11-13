@@ -19,10 +19,11 @@ import (
 //     already in the account, adopted and never given up. Sharing it with the hosts is
 //     EnsureLoadBalancer's (the silo's host announces it); unsharing, DeleteLoadBalancer's.
 //     Releasing unshares it everywhere and, if it reserved it, deletes the reservation.
-//   - linode-nodebalancer can't: its address is the NodeBalancer's. The balancer is keyed by the
-//     IP (its label carries the IP's UID), so it and its address last as long as the IP, across
-//     every backend change and from holder to holder; with nobody holding the IP it is parked
-//     (no configs: it keeps its address and sends nowhere), and releasing the IP deletes it.
+//   - linode-nodebalancer can't: its address is the NodeBalancer's. One NodeBalancer per IP (its
+//     label carries the IP's UID), a config per port of every service on the IP (they share it by
+//     default), so it and its address last as long as the IP, across every backend change and
+//     from holder to holder; with nobody holding the IP it is parked (no configs: it keeps its
+//     address and sends nowhere), and releasing the IP deletes it.
 
 // Handles tell a reserved address from one that was already the account's.
 const (
@@ -34,6 +35,11 @@ const (
 func (p *Provider) ReserveAddress(ctx context.Context, r kplugin.AddressReservation) (kplugin.AddressStatus, error) {
 	if r.Class != ClassSharedIP {
 		return kplugin.AddressStatus{}, fmt.Errorf("class %s holds no address apart from its load balancer: %w", r.Class, kplugin.ErrUnsupported)
+	}
+	for k := range r.Annotations {
+		if strings.HasPrefix(k, "linode.kevaso.com/") {
+			return kplugin.AddressStatus{}, fmt.Errorf("unknown annotation %s: a shared IP reads none: %w", k, kplugin.ErrUnsupported)
+		}
 	}
 	if r.Address != "" {
 		addr, err := netip.ParseAddr(r.Address)

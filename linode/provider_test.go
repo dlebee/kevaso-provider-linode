@@ -455,5 +455,66 @@ func TestInfoSaysWhatEachClassCan(t *testing.T) {
 // test against the fake API, above).
 func TestConformanceAddresses(t *testing.T) {
 	_, p := newFakeAPI(t)
-	kplugintest.Conformance(t, kplugintest.Suite{Plugin: p, Region: "ca-central", Classes: []string{"none: volumes are TestVolumeLifecycle's"}})
+	kplugintest.Conformance(t, kplugintest.Suite{Plugin: p, Region: "ca-central", Classes: []string{"none: volumes are TestVolumeLifecycle's"},
+		Host: kplugin.HostInfo{Name: "tor", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"}})
+}
+
+// The services sharing an IP share its NodeBalancer: a config per port, each to its own service's
+// hosts; annotations set a port's algorithm and proxy protocol (the IP's for all, a service's for
+// its own); unknown ones in linode.kevaso.com/ are refused, others ignored; a port twice is refused.
+func TestSharedNodeBalancer(t *testing.T) {
+	f, p := newFakeAPI(t)
+	tor := kplugin.HostInfo{Name: "tor", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"}
+	tor2 := kplugin.HostInfo{Name: "tor2", ID: "13", Region: "ca-central", PrivateAddress: "192.168.150.9"}
+	lb := kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: "default-ip-uid", Namespace: "shop", Name: "default-linode-nodebalancer",
+		Backends:    []kplugin.HostInfo{tor, tor2},
+		Annotations: map[string]string{AnnotationAlgorithm: "leastconn", "example.com/other": "ignored"},
+		Ports: []kplugin.Port{
+			{Name: "http", Protocol: "TCP", Port: 80, NodePort: 30000, Service: "silo/web", Backends: []kplugin.HostInfo{tor}},
+			{Name: "rpc", Protocol: "TCP", Port: 8545, NodePort: 30001, Service: "service/rpc", Backends: []kplugin.HostInfo{tor, tor2},
+				Annotations: map[string]string{AnnotationProxyProtocol: "v2", AnnotationAlgorithm: "source"}}}}
+	st, err := p.EnsureLoadBalancer(ctx, lb)
+	if err != nil || st.Address == "" || len(f.nbs) != 1 {
+		t.Fatalf("ensure: %+v %v %v", st, err, f.nbs)
+	}
+	var got []string
+	for _, cs := range f.configs {
+		for _, c := range cs {
+			var nodes []string
+			for _, n := range c["nodes"].([]any) {
+				nodes = append(nodes, n.(map[string]any)["address"].(string))
+			}
+			got = append(got, fmt.Sprint(c["port"], " ", c["algorithm"], " ", c["proxy_protocol"], " ", strings.Join(nodes, ",")))
+		}
+	}
+	sort.Strings(got)
+	if want := "80 leastconn none 192.168.140.7:30000|8545 source v2 192.168.140.7:30001,192.168.150.9:30001"; strings.Join(got, "|") != want {
+		t.Fatalf("configs:\n%s\nwant\n%s", strings.Join(got, "|"), want)
+	}
+	// One service leaves: same NodeBalancer, same address, its config gone.
+	one := lb
+	one.Ports = lb.Ports[:1]
+	if st2, err := p.EnsureLoadBalancer(ctx, one); err != nil || st2.Address != st.Address || len(f.nbs) != 1 {
+		t.Fatalf("a service gone: %+v %v", st2, err)
+	}
+	for _, cs := range f.configs {
+		if len(cs) != 1 {
+			t.Fatalf("configs after: %v", cs)
+		}
+	}
+	bad := one
+	bad.Annotations = map[string]string{"linode.kevaso.com/sticky": "yes"}
+	if _, err := p.EnsureLoadBalancer(ctx, bad); err == nil || !strings.Contains(err.Error(), "unknown annotation linode.kevaso.com/sticky") {
+		t.Fatalf("an unknown annotation: %v", err)
+	}
+	bad.Annotations = map[string]string{AnnotationAlgorithm: "random"}
+	if _, err := p.EnsureLoadBalancer(ctx, bad); err == nil {
+		t.Fatal("a bad algorithm")
+	}
+	twice := lb
+	twice.Ports = []kplugin.Port{lb.Ports[0], lb.Ports[0]}
+	twice.Ports[1].Service = "silo/other"
+	if _, err := p.EnsureLoadBalancer(ctx, twice); err == nil || !strings.Contains(err.Error(), "port 80") {
+		t.Fatalf("a port twice: %v", err)
+	}
 }

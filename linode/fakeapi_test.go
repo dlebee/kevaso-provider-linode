@@ -222,6 +222,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				c["nodes"] = body["nodes"]
 				c["port"] = body["port"]
+				c["algorithm"], c["proxy_protocol"] = body["algorithm"], body["proxy_protocol"]
 				reply(c)
 				return
 			}
