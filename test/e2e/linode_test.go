@@ -40,8 +40,8 @@ type siloStatus struct {
 		Phase   string `json:"phase"`
 		Host    string `json:"host"`
 		Service struct {
-			PublicIP  string `json:"publicIP"`
-			NodePorts []struct {
+			LoadBalancerIP string `json:"loadBalancerIP"`
+			NodePorts      []struct {
 				NodePort int `json:"nodePort"`
 			} `json:"nodePorts"`
 		} `json:"service"`
@@ -112,7 +112,7 @@ func TestLinode(t *testing.T) {
 	})
 
 	// 2. The cluster: kvoadm init, two workers with docker.
-	out := must("", kvoadm, append([]string{"init", "root@" + cp.Public, "--kevasod", kevasod, "--name", "cp", "--cluster", "e2e",
+	out := must("", kvoadm, append([]string{"init", "root@" + cp.Public, "--external-ip", cp.Public, "--kevasod", kevasod, "--name", "cp", "--cluster", "e2e",
 		"--api-server", "https://" + cp.Public + ":6443"}, ssh...)...)
 	if !regexp.MustCompile(`KVR1-`).MatchString(out) {
 		t.Fatalf("no recovery key printed:\n%s", out)
@@ -121,7 +121,7 @@ func TestLinode(t *testing.T) {
 		name string
 		m    machine
 	}{{"w1", w1}, {"w2", w2}} {
-		t.Log(must("", kvoadm, append([]string{"host", "add", "root@" + w.m.Public, "--kevasod", kevasod, "--name", w.name,
+		t.Log(must("", kvoadm, append([]string{"host", "add", "root@" + w.m.Public, "--external-ip", w.m.Public, "--kevasod", kevasod, "--name", w.name,
 			"--install", "worker", "--runtime", "docker", "--region", b.Region}, ssh...)...))
 	}
 
@@ -186,15 +186,16 @@ func TestLinode(t *testing.T) {
 		t.Logf("SKIPPING the NodeBalancer part: this token can't use NodeBalancers (%v); give it NodeBalancers read/write to test it", err)
 	}
 	exposure := `
+  ports: [{ name: http, port: 80 }]
   service:
-    ports: [{ name: http, port: 80 }]
-    expose: loadBalancer
+    ports: [{ port: http, loadBalancer: true }]
     loadBalancer: { class: linode-nodebalancer }
 `
 	if !nb {
 		exposure = `
+  ports: [{ name: http, port: 80 }]
   service:
-    ports: [{ name: http, port: 80 }]
+    ports: [{ port: http }]
 `
 	}
 	ingress := `---
@@ -212,7 +213,7 @@ spec:
   ingressClass: linode
   hosts: [shop.` + zone + `]
   tls: { none: true }
-  rules: [{ path: /, silo: { name: web, port: http } }]
+  rules: [{ path: /, service: { name: web, port: http } }]
 `
 	if !dns {
 		ingress = ""
@@ -226,7 +227,7 @@ kind: Silo
 metadata: { name: web, namespace: e2e }
 spec:
   runtime: docker
-  image: docker.io/library/nginx:1.27-alpine
+  container: { image: docker.io/library/nginx:1.27-alpine }
   resources: { cpu: 1, memory: 256Mi }
   volumes:
     - { name: site, class: linode-block, size: 10Gi, mountPath: /usr/share/nginx/html }
@@ -238,10 +239,10 @@ spec:
 	var web siloStatus
 	eventually("web running with its volume and NodeBalancer", 10*time.Minute, func() (bool, string) {
 		web = silo("web")
-		ok := web.Status.Phase == "Running" && (web.Status.Service.PublicIP != "" || !nb) && len(web.Status.Volumes) == 1 && web.Status.Volumes[0].Mounted
+		ok := web.Status.Phase == "Running" && (web.Status.Service.LoadBalancerIP != "" || !nb) && len(web.Status.Volumes) == 1 && web.Status.Volumes[0].Mounted
 		return ok, fmt.Sprintf("%+v", web.Status)
 	})
-	t.Logf("web on %s, NodeBalancer %s, volume %s at %s", web.Status.Host, web.Status.Service.PublicIP, web.Status.Volumes[0].Handle, web.Status.Volumes[0].Device)
+	t.Logf("web on %s, NodeBalancer %s, volume %s at %s", web.Status.Host, web.Status.Service.LoadBalancerIP, web.Status.Volumes[0].Handle, web.Status.Volumes[0].Device)
 	host := map[string]machine{"w1": w1, "w2": w2}[web.Status.Host]
 	if out, _ := b.SSH(ctx, host, "findmnt -n -o SOURCE,FSTYPE /var/lib/kevaso/volumes/"+web.Metadata.UID+"/site"); !strings.Contains(out, "ext4") {
 		t.Fatalf("volume mount on %s: %q", web.Status.Host, out)
@@ -256,9 +257,9 @@ spec:
 	if dns {
 		eventually("shop."+zone+" in Linode DNS", 20*time.Minute, func() (bool, string) {
 			addrs, err := lookup(ctx, "shop."+zone)
-			return err == nil && len(addrs) == 1 && addrs[0] == web.Status.Service.PublicIP, fmt.Sprint(addrs, err)
+			return err == nil && len(addrs) == 1 && addrs[0] == web.Status.Service.LoadBalancerIP, fmt.Sprint(addrs, err)
 		})
-		t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.PublicIP)
+		t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.LoadBalancerIP)
 		must("", kvo, "delete", "ingress", "shop", "-n", "e2e")
 	}
 
@@ -310,19 +311,20 @@ kind: Silo
 metadata: { name: edge, namespace: e2e }
 spec:
   runtime: docker
-  image: docker.io/library/nginx:1.27-alpine
+  container:
+    image: docker.io/library/nginx:1.27-alpine
+    command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
   resources: { cpu: 1, memory: 256Mi }
   availability: { onHostLoss: Recreate }
-  command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
+  ports: [{ name: http, port: 80 }]
   service:
-    ports: [{ name: http, port: 80 }]
-    expose: loadBalancer
+    ports: [{ port: http, loadBalancer: true }]
     loadBalancer: { class: linode-shared-ip, ip: edge }
 `, kvo, "apply", "-f", "-")
 	var edge siloStatus
 	eventually("edge running on the shared IP", 8*time.Minute, func() (bool, string) {
 		edge = silo("edge")
-		return edge.Status.Phase == "Running" && edge.Status.Service.PublicIP == donor.Public, fmt.Sprintf("%+v", edge.Status)
+		return edge.Status.Phase == "Running" && edge.Status.Service.LoadBalancerIP == donor.Public, fmt.Sprintf("%+v", edge.Status)
 	})
 	first := edge.Status.Host
 	eventually("http://"+donor.Public+"/ answered by edge on "+first, 5*time.Minute, func() (bool, string) {
@@ -358,10 +360,10 @@ spec:
 func testNodeBalancer(t *testing.T, web siloStatus, host machine, eventually func(string, time.Duration, func() (bool, string))) {
 	t.Helper()
 	eventually("the page through the NodeBalancer", 5*time.Minute, func() (bool, string) {
-		body, err := get("http://" + web.Status.Service.PublicIP + "/")
+		body, err := get("http://" + web.Status.Service.LoadBalancerIP + "/")
 		return strings.Contains(body, "served from a Linode volume"), fmt.Sprint(body, err)
 	})
-	t.Logf("http://%s/ answers from the volume through the NodeBalancer", web.Status.Service.PublicIP)
+	t.Logf("http://%s/ answers from the volume through the NodeBalancer", web.Status.Service.LoadBalancerIP)
 	// The node port isn't open to the internet, only to the NodeBalancer.
 	if np := web.Status.Service.NodePorts; len(np) == 1 {
 		if body, err := get(fmt.Sprintf("http://%s:%d/", host.Public, np[0].NodePort)); err == nil {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,7 +146,7 @@ func (p *Provider) instancesNow(ctx context.Context) ([]linodego.Instance, error
 var privateNet = netip.MustParsePrefix("192.168.128.0/17") // Linode private IPv4s
 
 // DescribeHosts implements kplugin.HostDescriber: a host is a Linode when one of its IPv4s is the
-// host's address.
+// host's external or internal IP.
 func (p *Provider) DescribeHosts(ctx context.Context, hosts []kplugin.Host) ([]kplugin.HostInfo, error) {
 	is, err := p.instancesNow(ctx)
 	if err != nil {
@@ -153,9 +154,11 @@ func (p *Provider) DescribeHosts(ctx context.Context, hosts []kplugin.Host) ([]k
 	}
 	var out []kplugin.HostInfo
 	for _, h := range hosts {
-		want, err := netip.ParseAddr(h.Address)
-		if err != nil {
-			continue
+		var want []netip.Addr
+		for _, s := range []string{h.ExternalIP, h.InternalIP} {
+			if a, err := netip.ParseAddr(s); err == nil {
+				want = append(want, a)
+			}
 		}
 		for _, in := range is {
 			match, private := false, ""
@@ -164,7 +167,7 @@ func (p *Provider) DescribeHosts(ctx context.Context, hosts []kplugin.Host) ([]k
 				if !ok {
 					continue
 				}
-				if a == want {
+				if slices.Contains(want, a) {
 					match = true
 				}
 				if privateNet.Contains(a) {

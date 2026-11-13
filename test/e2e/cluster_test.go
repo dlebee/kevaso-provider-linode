@@ -116,13 +116,13 @@ func (c *fleet) diagnoseOnFailure(t *testing.T) {
 // install makes the cluster on fresh machines.
 func (c *fleet) install(t *testing.T) {
 	b := c.b
-	out := c.must(t, "", c.kvoadm, append([]string{"init", "root@" + c.cp.Public, "--kevasod", c.kevasod, "--name", "cp", "--cluster", "e2e",
+	out := c.must(t, "", c.kvoadm, append([]string{"init", "root@" + c.cp.Public, "--external-ip", c.cp.Public, "--kevasod", c.kevasod, "--name", "cp", "--cluster", "e2e",
 		"--api-server", "https://" + c.cp.Public + ":6443"}, c.ssh...)...)
 	if !regexp.MustCompile(`KVR1-`).MatchString(out) {
 		t.Fatalf("no recovery key printed:\n%s", out)
 	}
 	for name, m := range map[string]machine{"w1": c.w1, "w2": c.w2} {
-		t.Log(c.must(t, "", c.kvoadm, append([]string{"host", "add", "root@" + m.Public, "--kevasod", c.kevasod, "--name", name,
+		t.Log(c.must(t, "", c.kvoadm, append([]string{"host", "add", "root@" + m.Public, "--external-ip", m.Public, "--kevasod", c.kevasod, "--name", name,
 			"--install", "worker", "--runtime", "docker", "--region", b.Region}, c.ssh...)...))
 	}
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")

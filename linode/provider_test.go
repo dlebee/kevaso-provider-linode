@@ -19,7 +19,7 @@ func TestDescribeHosts(t *testing.T) {
 	f, p := newFakeAPI(t)
 	f.addLinode(11, "ca-central", "172.105.1.1", "192.168.140.7")
 	f.addLinode(12, "us-ord", "172.232.2.2")
-	got, err := p.DescribeHosts(ctx, []kplugin.Host{{Name: "tor", Address: "172.105.1.1"}, {Name: "chi", Address: "172.232.2.2"}, {Name: "home", Address: "203.0.113.4"}})
+	got, err := p.DescribeHosts(ctx, []kplugin.Host{{Name: "tor", ExternalIP: "172.105.1.1"}, {Name: "chi", InternalIP: "192.168.150.2", ExternalIP: "172.232.2.2"}, {Name: "home", ExternalIP: "203.0.113.4"}})
 	if err != nil {
 		t.Fatal(err)
 	}
