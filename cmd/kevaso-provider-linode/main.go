@@ -41,8 +41,9 @@ func main() {
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1], os.Args[2:]); err != nil {
+	err := run(ctx, os.Args[1], os.Args[2:])
+	stop()
+	if err != nil {
 		log.Printf("kevaso-provider-linode: %v", err)
 		os.Exit(1)
 	}
