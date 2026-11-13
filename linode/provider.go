@@ -114,7 +114,7 @@ func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 		// can move within the region (design §0.3).
 		Storage: []kplugin.Class{{Name: ClassBlock, Description: "Linode Block Storage, attached to the silo's host", OwnHostsOnly: true,
 			Topology: kplugin.TopologyRegion}},
-		DNS:     []string{DNSName}}, nil
+		DNS: []string{DNSName}}, nil
 }
 
 // instancesNow lists the account's Linodes (cached for 30 s: describing many hosts is one call).
