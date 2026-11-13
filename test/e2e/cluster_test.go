@@ -52,17 +52,17 @@ func newCluster(t *testing.T, ctx context.Context, b *bed) *fleet {
 		kvo:     build(t, ctx, bin, "kvo", "kevaso.com/core/cmd/kvo", false),
 		kevasod: build(t, ctx, bin, "kevasod", "kevaso.com/core/cmd/kevasod", true),
 		plugin:  build(t, ctx, bin, "kevaso-provider-linode", "kevaso.com/provider-linode/cmd/kevaso-provider-linode", true),
-		ssh:     []string{"--ssh-key", b.key, "--accept-host-key-on-first-use"},
+		ssh:     []string{"--ssh-key", b.Key, "--accept-host-key-on-first-use"},
 	}
 	home := t.TempDir()
-	if b.state != "" {
-		home = filepath.Join(b.state, "home")
+	if b.State != "" {
+		home = filepath.Join(b.State, "home")
 	}
 	c.env = append(os.Environ(), "HOME="+home, "KVO_CONFIG="+filepath.Join(home, ".kevaso", "config.yaml"), "KVO_SERVER=", "KVO_TOKEN=")
-	if ms, ok := b.restore(t); ok {
-		c.ssh = []string{"--ssh-key", b.key, "--accept-host-key-on-first-use"}
+	if ms, ok := b.Restore(t); ok {
+		c.ssh = []string{"--ssh-key", b.Key, "--accept-host-key-on-first-use"}
 		c.cp, c.w1, c.w2 = ms["cp"], ms["w1"], ms["w2"]
-		t.Logf("reusing the cluster in %s: cp %s, w1 %s, w2 %s", b.state, c.cp.Public, c.w1.Public, c.w2.Public)
+		t.Logf("reusing the cluster in %s: cp %s, w1 %s, w2 %s", b.State, c.cp.Public, c.w1.Public, c.w2.Public)
 		c.diagnoseOnFailure(t)
 		c.redeploy(t)
 		return c
@@ -74,7 +74,7 @@ func newCluster(t *testing.T, ctx context.Context, b *bed) *fleet {
 	}
 	ch := make(chan made, 3)
 	for _, role := range []string{"cp", "w1", "w2"} {
-		go func() { ch <- made{role, b.create(ctx, role)} }()
+		go func() { ch <- made{role, b.Create(ctx, role)} }()
 	}
 	ms := map[string]machine{}
 	for i := 0; i < 3; i++ {
@@ -85,7 +85,7 @@ func newCluster(t *testing.T, ctx context.Context, b *bed) *fleet {
 		t.FailNow()
 	}
 	c.cp, c.w1, c.w2 = ms["cp"], ms["w1"], ms["w2"]
-	b.save(t, ms)
+	b.Save(t, ms)
 	c.diagnoseOnFailure(t)
 	c.install(t)
 	return c
@@ -101,7 +101,7 @@ func (c *fleet) diagnoseOnFailure(t *testing.T) {
 		dctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		for name, m := range map[string]machine{"cp": c.cp, "w1": c.w1, "w2": c.w2} {
-			out, _ := b.ssh(dctx, m, "journalctl -u kevasod -n 80 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -60; docker ps -a 2>&1 | head; nft list ruleset 2>&1 | grep -i 'kevaso\\|dnat\\|reject' | head -40")
+			out, _ := b.SSH(dctx, m, "journalctl -u kevasod -n 80 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -60; docker ps -a 2>&1 | head; nft list ruleset 2>&1 | grep -i 'kevaso\\|dnat\\|reject' | head -40")
 			t.Logf("── %s ──\n%s", name, out)
 		}
 		for _, args := range [][]string{{"get", "hosts", "-o", "wide"}, {"get", "silos", "-A", "-o", "yaml"}, {"get", "leases", "-A"}} {
@@ -123,14 +123,14 @@ func (c *fleet) install(t *testing.T) {
 	}
 	for name, m := range map[string]machine{"w1": c.w1, "w2": c.w2} {
 		t.Log(c.must(t, "", c.kvoadm, append([]string{"host", "add", "root@" + m.Public, "--kevasod", c.kevasod, "--name", name,
-			"--install", "worker", "--runtime", "docker", "--region", b.region}, c.ssh...)...))
+			"--install", "worker", "--runtime", "docker", "--region", b.Region}, c.ssh...)...))
 	}
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
-	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.tag, b.tag+"-")), 0o644)
+	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.Tag, b.Tag+"-")), 0o644)
 	t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + c.cp.Public, "--name", "linode", "--binary", c.plugin,
 		"--credential", "token=" + os.Getenv("KEVASO_LINODE_TOKEN_FILE"), "--config", cfgFile}, c.ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
-	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.region)), 0o644)
+	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []machine{c.w1, c.w2} {
 		t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", c.plugin,
 			"--side", "node", "--config", nodeCfg}, c.ssh...)...))
@@ -297,15 +297,15 @@ func (c *fleet) redeploy(t *testing.T) {
 	want := sum(c.kevasod)
 	for _, name := range []string{"cp", "w1", "w2"} {
 		m := c.host(name)
-		if out, _ := c.b.ssh(c.ctx, m, "sha256sum /usr/local/bin/kevasod"); strings.HasPrefix(out, want) {
+		if out, _ := c.b.SSH(c.ctx, m, "sha256sum /usr/local/bin/kevasod"); strings.HasPrefix(out, want) {
 			continue
 		}
-		scp := exec.CommandContext(c.ctx, "scp", "-q", "-i", c.b.key, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+		scp := exec.CommandContext(c.ctx, "scp", "-q", "-i", c.b.Key, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
 			"-o", "LogLevel=ERROR", c.kevasod, "root@"+m.Public+":/usr/local/bin/kevasod.new")
 		if out, err := scp.CombinedOutput(); err != nil {
 			t.Fatalf("copy kevasod to %s: %v %s", name, err, out)
 		}
-		if out, err := c.b.ssh(c.ctx, m, "mv /usr/local/bin/kevasod.new /usr/local/bin/kevasod && systemctl restart kevasod"); err != nil {
+		if out, err := c.b.SSH(c.ctx, m, "mv /usr/local/bin/kevasod.new /usr/local/bin/kevasod && systemctl restart kevasod"); err != nil {
 			t.Fatalf("restart kevasod on %s: %v %s", name, err, out)
 		}
 		t.Logf("%s: kevasod replaced with this build", name)

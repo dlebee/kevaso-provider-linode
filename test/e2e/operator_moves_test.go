@@ -41,13 +41,13 @@ func (c *fleet) operator(t *testing.T) {
 		}
 	}
 	const unit = "kevaso-plugin-sessions.service"
-	if out, err := c.b.ssh(c.ctx, c.cp, "systemctl is-active "+unit); err != nil || strings.TrimSpace(out) != "active" {
+	if out, err := c.b.SSH(c.ctx, c.cp, "systemctl is-active "+unit); err != nil || strings.TrimSpace(out) != "active" {
 		t.Fatalf("%s: %s %v", unit, out, err)
 	}
 
 	// Sandboxed as declared: a dynamic user, no capabilities, no new privileges, the file
 	// system read-only but for its state, and its credentials through systemd only.
-	props, _ := c.b.ssh(c.ctx, c.cp, "systemctl show "+unit+" -p DynamicUser -p NoNewPrivileges -p ProtectSystem -p ProtectHome -p PrivateTmp "+
+	props, _ := c.b.SSH(c.ctx, c.cp, "systemctl show "+unit+" -p DynamicUser -p NoNewPrivileges -p ProtectSystem -p ProtectHome -p PrivateTmp "+
 		"-p PrivateDevices -p CapabilityBoundingSet -p RestrictNamespaces -p MemoryDenyWriteExecute -p StateDirectory -p MainPID; systemctl cat "+unit+" | grep LoadCredential")
 	for _, w := range []string{"DynamicUser=yes", "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes",
 		"PrivateDevices=yes", "CapabilityBoundingSet=\n", "MemoryDenyWriteExecute=yes", "StateDirectory=kevaso-plugin-sessions", "LoadCredential=token.json:/etc/kevaso/plugins/sessions/token.json"} {
@@ -61,7 +61,7 @@ func (c *fleet) operator(t *testing.T) {
 			pid = strings.TrimSpace(v)
 		}
 	}
-	st, _ := c.b.ssh(c.ctx, c.cp, "grep -E '^(Uid|NoNewPrivs|CapEff|CapPrm):' /proc/"+pid+"/status; tr '\\0' '\\n' < /proc/"+pid+"/environ | grep -c -i token; "+
+	st, _ := c.b.SSH(c.ctx, c.cp, "grep -E '^(Uid|NoNewPrivs|CapEff|CapPrm):' /proc/"+pid+"/status; tr '\\0' '\\n' < /proc/"+pid+"/environ | grep -c -i token; "+
 		"nsenter -t "+pid+" -m sh -c 'touch /etc/kevaso-x 2>&1; touch /usr/local/bin/x 2>&1; ls /root 2>&1' || true")
 	for _, w := range []string{"NoNewPrivs:\t1", "CapEff:\t0000000000000000", "CapPrm:\t0000000000000000"} {
 		if !strings.Contains(st, w) {
@@ -112,7 +112,7 @@ spec:
 	t.Log("session dev made silo dev-0 and reports it Running")
 
 	// Its token holds its own roles only.
-	tok, err := c.b.ssh(c.ctx, c.cp, "cat /var/lib/private/kevaso-plugin-sessions/token.json 2>/dev/null || cat /etc/kevaso/plugins/sessions/token.json")
+	tok, err := c.b.SSH(c.ctx, c.cp, "cat /var/lib/private/kevaso-plugin-sessions/token.json 2>/dev/null || cat /etc/kevaso/plugins/sessions/token.json")
 	var tk struct{ Token string }
 	if err != nil || json.Unmarshal([]byte(tok), &tk) != nil || tk.Token == "" {
 		t.Fatal("the controller's token isn't where its unit keeps it")
@@ -164,7 +164,7 @@ spec:
 	})
 	c.mustKvo(t, "delete", "sessiontemplate", "py")
 	t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "uninstall", "sessions"}, c.ssh...)...))
-	if out, _ := c.b.ssh(c.ctx, c.cp, "systemctl is-active "+unit+"; ls /etc/systemd/system/"+unit+" /etc/kevaso/plugins/sessions 2>&1"); strings.Contains(out, "\nactive") || !strings.Contains(out, "No such file") {
+	if out, _ := c.b.SSH(c.ctx, c.cp, "systemctl is-active "+unit+"; ls /etc/systemd/system/"+unit+" /etc/kevaso/plugins/sessions 2>&1"); strings.Contains(out, "\nactive") || !strings.Contains(out, "No such file") {
 		t.Fatalf("after uninstall, on the host:\n%s", out)
 	}
 	if out, _ := c.sh("", c.kvoadm, "plugin", "list"); strings.Contains(out, "sessions") {
@@ -199,7 +199,7 @@ func (c *fleet) watch(t *testing.T, silo string) *watcher {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			cmd := c.b.sshCmd(ctx, m, "while :; do echo $(date +%s.%N) $(docker ps -q --filter label=kevaso.com/namespace=e2e --filter label=kevaso.com/name="+
+			cmd := c.b.SSHCmd(ctx, m, "while :; do echo $(date +%s.%N) $(docker ps -q --filter label=kevaso.com/namespace=e2e --filter label=kevaso.com/name="+
 				silo+" --filter status=running | wc -l); sleep 0.25; done")
 			out, err := cmd.StdoutPipe()
 			if err != nil || cmd.Start() != nil {
@@ -344,11 +344,11 @@ spec:
 	o := other(h)
 	w := c.watch(t, "ha")
 	time.Sleep(3 * time.Second)
-	if err := c.b.api.ShutdownInstance(c.ctx, c.host(h).ID); err != nil {
+	if err := c.b.API.ShutdownInstance(c.ctx, c.host(h).ID); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { // back on, for whatever runs next on this cluster
-		if err := c.b.api.BootInstance(context.Background(), c.host(h).ID, 0); err != nil {
+		if err := c.b.API.BootInstance(context.Background(), c.host(h).ID, 0); err != nil {
 			t.Logf("boot %s again: %v", h, err)
 			return
 		}
@@ -399,7 +399,7 @@ spec:
 	}
 	c.eventually(t, "the volumes deleted with their silos", 6*time.Minute, func() (bool, string) {
 		var left []string
-		for _, l := range c.b.remaining(c.ctx) {
+		for _, l := range c.b.Remaining(c.ctx) {
 			if strings.HasPrefix(l, "volume ") {
 				left = append(left, l)
 			}

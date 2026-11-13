@@ -29,8 +29,8 @@ func TestWorkloads(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Minute)
 	defer cancel()
 	b := newBed(t, tokenFile, "kvt-wk-")
-	t.Logf("run tag %s, region %s", b.tag, b.region)
-	b.cleanupAtEnd(t)
+	t.Logf("run tag %s, region %s", b.Tag, b.Region)
+	b.CleanupAtEnd(t)
 	start := time.Now()
 	c := newCluster(t, ctx, b)
 	t.Logf("cluster up in %s", time.Since(start).Round(time.Second))
@@ -369,7 +369,7 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	}
 	ninfo, _ := c.silo("narrow")
 	c.eventually(t, "narrow's rule from 203.0.113.0/24 on its host", 30*time.Second, func() (bool, string) {
-		out, _ := c.b.ssh(c.ctx, c.host(ninfo.Status.Host), "nft list ruleset | grep 'dport 9231'")
+		out, _ := c.b.SSH(c.ctx, c.host(ninfo.Status.Host), "nft list ruleset | grep 'dport 9231'")
 		return strings.Contains(out, "203.0.113.0/24"), out
 	})
 	staysClosed("narrow", "open, but only from 203.0.113.0/24", 10*time.Second)
