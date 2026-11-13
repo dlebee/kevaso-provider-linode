@@ -282,7 +282,7 @@ metadata: { name: shop, namespace: e2e }
 spec:
   ingressClass: linode
   hosts: [shop.` + zone + `]
-  tls: { mode: none }
+  tls: { none: true }
   rules: [{ path: /, silo: { name: web, port: http } }]
 `
 	if !dns {
