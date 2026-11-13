@@ -240,7 +240,7 @@ func (c *fleet) killedClient(t *testing.T, host machine) {
 			}
 		}
 		count := func() string {
-			out, _ := c.b.ssh(c.ctx, host, "ps -eo args | grep -c '^sleep "+marker+"$'")
+			out, _ := c.b.SSH(c.ctx, host, "ps -eo args | grep -c '^sleep "+marker+"$'")
 			return strings.TrimSpace(out)
 		}
 		c.eventually(t, "sleep "+marker+" running on the host", 30*time.Second, func() (bool, string) { n := count(); return n == "1", n })

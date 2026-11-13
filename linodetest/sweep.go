@@ -1,6 +1,8 @@
-// Package e2e holds the tests that run on real Linodes (build tag e2e); this file, with no tag,
-// holds the rule deciding what their sweeps may delete, so it is unit tested on every go test.
-package e2e
+// Package linodetest is the Linode account and clusters for end-to-end tests on real Linodes (this
+// provider's test/e2e, and other providers'): a Bed makes the run's machines and sweeps only what
+// is the run's (the rule below, unit tested on every go test), a Kit builds the CLIs and drives
+// clusters with them.
+package linodetest
 
 import "strings"
 
