@@ -198,12 +198,14 @@ func TestLinode(t *testing.T) {
     ports: [{ port: http }]
 `
 	}
-	ingress := `---
-apiVersion: kevaso/v1
+	// web is also the class's controller: the nginx driver writes its nginx.conf (one server per
+	// Ingress host, 404 for any other), so the Ingress goes in after the page has been fetched at
+	// the bare address.
+	ingress := `apiVersion: kevaso/v1
 kind: IngressClass
 metadata: { name: linode }
 spec:
-  controller: { silo: web, namespace: e2e }
+  controller: { driver: nginx, silo: web, namespace: e2e }
   dns: { provider: linode, ttl: 30 }
 ---
 apiVersion: kevaso/v1
@@ -215,9 +217,6 @@ spec:
   tls: { none: true }
   rules: [{ path: /, service: { name: web, port: http } }]
 `
-	if !dns {
-		ingress = ""
-	}
 	must(`apiVersion: kevaso/v1
 kind: Namespace
 metadata: { name: e2e }
@@ -227,7 +226,7 @@ kind: Silo
 metadata: { name: web, namespace: e2e }
 spec:
   runtime: docker
-  container: { image: docker.io/library/nginx:1.27-alpine }
+  container: { image: docker.io/library/nginx:1.27 }
   resources: { cpu: 1, memory: 256Mi }
   volumes:
     - { name: site, class: linode-block, size: 10Gi, mountPath: /usr/share/nginx/html }
@@ -235,7 +234,7 @@ spec:
     steps:
       - name: page
         run: |
-          [ -f /usr/share/nginx/html/index.html ] || echo "served from a Linode volume" > /usr/share/nginx/html/index.html`+exposure+ingress, kvo, "apply", "-f", "-")
+          [ -f /usr/share/nginx/html/index.html ] || echo "served from a Linode volume" > /usr/share/nginx/html/index.html`+exposure, kvo, "apply", "-f", "-")
 	var web siloStatus
 	eventually("web running with its volume and NodeBalancer", 10*time.Minute, func() (bool, string) {
 		web = silo("web")
@@ -255,6 +254,7 @@ spec:
 		testNodeBalancer(t, web, host, eventually)
 	}
 	if dns {
+		must(ingress, kvo, "apply", "-f", "-")
 		eventually("shop."+zone+" in Linode DNS", 20*time.Minute, func() (bool, string) {
 			addrs, err := lookup(ctx, "shop."+zone)
 			return err == nil && len(addrs) == 1 && addrs[0] == web.Status.Service.LoadBalancerIP, fmt.Sprint(addrs, err)
