@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -254,4 +255,30 @@ func hasWrite(calls []string) bool {
 		}
 	}
 	return false
+}
+
+// A standalone Service's load balancer: one backend per host with endpoints, each on the
+// service's node port.
+func TestNodeBalancerForAService(t *testing.T) {
+	f, p := newFakeAPI(t)
+	lb := kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: "5e1f0000-aaaa-bbbb-cccc-ddddeeeeffff", Namespace: "web3", Name: "rpc",
+		Ports: []kplugin.Port{{Name: "rpc", Protocol: "TCP", Port: 8545, NodePort: 32000}},
+		Backends: []kplugin.HostInfo{
+			{Name: "tor1", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"},
+			{Name: "tor2", ID: "12", Region: "ca-central", PrivateAddress: "192.168.140.8"}}}
+	if _, err := p.EnsureLoadBalancer(ctx, lb); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, cs := range f.configs {
+		for _, c := range cs {
+			for _, n := range c["nodes"].([]any) {
+				got = append(got, fmt.Sprint(c["port"])+"→"+n.(map[string]any)["address"].(string))
+			}
+		}
+	}
+	sort.Strings(got)
+	if strings.Join(got, " ") != "8545→192.168.140.7:32000 8545→192.168.140.8:32000" {
+		t.Fatalf("backends: %v", got)
+	}
 }
