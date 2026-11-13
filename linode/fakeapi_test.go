@@ -120,6 +120,27 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			notFound()
 		}
+	case r.Method == "POST" && p == "/networking/reserved/ips":
+		region, _ := body["region"].(string)
+		addr := fmt.Sprintf("172.105.200.%d", f.id()%250)
+		f.ips[addr] = map[string]any{"address": addr, "linode_id": 0, "region": region, "type": "ipv4", "public": true, "reserved": true}
+		reply(f.ips[addr])
+	case r.Method == "DELETE" && len(parts) == 4 && parts[0] == "networking" && parts[1] == "reserved" && parts[2] == "ips":
+		ip, ok := f.ips[parts[3]]
+		if !ok || ip["reserved"] != true {
+			notFound()
+			return
+		}
+		delete(f.ips, parts[3])
+		reply(map[string]any{})
+	case r.Method == "POST" && p == "/networking/ips/assign":
+		for _, a := range body["assignments"].([]any) {
+			m := a.(map[string]any)
+			if ip, ok := f.ips[m["address"].(string)]; ok {
+				ip["linode_id"] = int(m["linode_id"].(float64))
+			}
+		}
+		reply(map[string]any{})
 	case r.Method == "POST" && p == "/networking/ips/share":
 		var ips []string
 		for _, x := range body["ips"].([]any) {
@@ -201,6 +222,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				c["nodes"] = body["nodes"]
 				c["port"] = body["port"]
+				c["algorithm"], c["proxy_protocol"] = body["algorithm"], body["proxy_protocol"]
 				reply(c)
 				return
 			}

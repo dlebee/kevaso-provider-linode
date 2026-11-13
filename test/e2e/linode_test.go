@@ -297,9 +297,15 @@ spec:
 		t.Log("deleting the silo detached and deleted its volume")
 	}
 
-	// 6. A shared IP that follows its silo: the donor's IPv4, announced over BGP by the silo's host;
-	// that host goes down, the silo is recreated on the other one, and the address answers there.
+	// 6. A shared IP that follows its silo: the donor's IPv4 (an IP object adopting it, kept), announced
+	// over BGP by the silo's host; that host goes down, the silo is recreated on the other one, and the
+	// address answers there.
 	must(`apiVersion: kevaso/v1
+kind: IP
+metadata: { name: edge, namespace: e2e }
+spec: { class: linode-shared-ip, address: `+donor.Public+` }
+---
+apiVersion: kevaso/v1
 kind: Silo
 metadata: { name: edge, namespace: e2e }
 spec:
@@ -311,7 +317,7 @@ spec:
   service:
     ports: [{ name: http, port: 80 }]
     expose: loadBalancer
-    loadBalancer: { class: linode-shared-ip, address: `+donor.Public+` }
+    loadBalancer: { class: linode-shared-ip, ip: edge }
 `, kvo, "apply", "-f", "-")
 	var edge siloStatus
 	eventually("edge running on the shared IP", 8*time.Minute, func() (bool, string) {
