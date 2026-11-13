@@ -27,6 +27,9 @@ func NodeBalancerLabel(id string) string {
 func (p *Provider) EnsureLoadBalancer(ctx context.Context, lb kplugin.LoadBalancer) (kplugin.LoadBalancerStatus, error) {
 	switch lb.Class {
 	case ClassNodeBalancer:
+		if len(lb.Backends) == 0 && len(lb.Ports) == 0 {
+			return p.parkNodeBalancer(ctx, lb) // nobody holds its IP: keep the address, send nowhere
+		}
 		return p.ensureNodeBalancer(ctx, lb)
 	case ClassSharedIP:
 		return p.ensureSharedIP(ctx, lb)
@@ -151,12 +154,13 @@ func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalanc
 	return kplugin.LoadBalancerStatus{Address: *nb.IPv4, SourceRanges: []string{NodeBalancerSources}}, nil
 }
 
-// ensureSharedIP shares lb.Address (an IPv4 of a Linode in the account, in the hosts' region) with
-// every Linode host in that region, so whichever of them has the silo can announce it.
+// ensureSharedIP shares lb.Address (the IP's address: reserved, or already the account's, in the
+// hosts' region) with every Linode host in that region, so whichever of them has the silo can
+// announce it. A reserved address no Linode has yet is assigned to the silo's host first.
 func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) (kplugin.LoadBalancerStatus, error) {
 	addr, err := netip.ParseAddr(lb.Address)
 	if err != nil || !addr.Is4() {
-		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s needs loadBalancer.address: an IPv4 of a Linode in your account (extra IPv4s are asked for through Linode support)", ClassSharedIP)
+		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s needs its IP's address (an IP object of class %s, reserved in a region, or one with spec.address you already own)", ClassSharedIP, ClassSharedIP)
 	}
 	ip, err := p.API.GetIPAddress(ctx, addr.String())
 	if err != nil {
@@ -168,6 +172,10 @@ func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) 
 	if b := lb.Backends[0]; b.Region != ip.Region {
 		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s is in %s; the silo's host %s is in %s: put the silo in %s (placement.hostSelector or region)", addr, ip.Region, b.Name, b.Region, ip.Region)
 	}
+	owner, err := p.assignIfUnassigned(ctx, ip, lb.Backends[0])
+	if err != nil {
+		return kplugin.LoadBalancerStatus{}, err
+	}
 	for _, h := range lb.Hosts {
 		if h.Region != ip.Region {
 			continue
@@ -176,7 +184,7 @@ func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) 
 		if err != nil {
 			return kplugin.LoadBalancerStatus{}, err
 		}
-		if id == ip.LinodeID {
+		if id == owner {
 			continue // its own address
 		}
 		if err := p.setShared(ctx, id, func(cur []string) []string {
