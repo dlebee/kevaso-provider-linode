@@ -227,7 +227,7 @@ kind: Silo
 metadata: { name: web, namespace: e2e }
 spec:
   runtime: docker
-  image: docker.io/library/nginx:1.27-alpine
+  container: { image: docker.io/library/nginx:1.27-alpine }
   resources: { cpu: 1, memory: 256Mi }
   volumes:
     - { name: site, class: linode-block, size: 10Gi, mountPath: /usr/share/nginx/html }
@@ -311,10 +311,11 @@ kind: Silo
 metadata: { name: edge, namespace: e2e }
 spec:
   runtime: docker
-  image: docker.io/library/nginx:1.27-alpine
+  container:
+    image: docker.io/library/nginx:1.27-alpine
+    command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
   resources: { cpu: 1, memory: 256Mi }
   availability: { onHostLoss: Recreate }
-  command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
   ports: [{ name: http, port: 80 }]
   service:
     ports: [{ port: http, loadBalancer: true }]

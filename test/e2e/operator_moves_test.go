@@ -80,9 +80,10 @@ metadata: { name: py }
 spec:
   silo:
     runtime: docker
-    image: `+pyImage+`
+    container:
+      image: `+pyImage+`
+      command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
     resources: { memory: 64Mi }
-    command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
 ---
 apiVersion: example.dev/v1
 kind: Session
@@ -282,9 +283,10 @@ kind: Silo
 metadata: { name: roam }
 spec:
   runtime: docker
-  image: `+pyImage+`
+  container:
+    image: `+pyImage+`
+    command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
   resources: { memory: 64Mi }
-  command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
 `)
 	roam := c.running(t, "roam", 6*time.Minute)
 	if roam.Status.Movable != "Anywhere" {
@@ -299,9 +301,10 @@ kind: Silo
 metadata: { name: %s }
 spec:
   runtime: docker
-  image: %s
+  container:
+    image: %s
+    command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
   resources: { memory: 64Mi }
-  command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
   availability: { onHostLoss: %s }
   volumes:
     - { name: data, class: linode-block, size: 10Gi, mountPath: /data }

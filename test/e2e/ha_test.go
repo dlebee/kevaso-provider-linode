@@ -108,7 +108,7 @@ kind: Silo
 metadata: { name: ` + name + `, namespace: ` + h.ns + ` }
 spec:
   runtime: docker
-  image: docker.io/library/nginx:1.27-alpine
+  container: { image: docker.io/library/nginx:1.27-alpine }
   resources: { memory: 64Mi }
 `
 }

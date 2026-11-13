@@ -142,9 +142,10 @@ kind: Silo
 metadata: { name: %s }
 spec:
   runtime: docker
-  image: %s
+  container:
+    image: %s
+    command: [python3, -u, -c, %s]
   resources: { memory: 64Mi }
-  command: [python3, -u, -c, %s]
   ports: [{ name: web, port: %d }, { name: debug, port: %d }]
   service:
     ports: [{ port: web, hostPort: [external] }, { port: debug, hostPort: [external], %s }]
@@ -437,9 +438,10 @@ kind: Silo
 metadata: { name: term }
 spec:
   runtime: docker
-  image: `+pyImage+`
+  container:
+    image: `+pyImage+`
+    command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
   resources: { memory: 96Mi }
-  command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
 `)
 	info := c.running(t, "term", 6*time.Minute)
 	host := c.host(info.Status.Host)
