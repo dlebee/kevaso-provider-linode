@@ -109,5 +109,5 @@ gopkg.in/ini.v1 v1.67.2/go.mod h1:x/cyOwCgZqOkJoDIJ3c1KNHMo10+nLGAhh+kn3Zizss=
 gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-kevaso.com/core/sdk v0.0.0-20261113001111-13f70b119f73 h1:ZeF374Zf2JEskpZT7SHhs2e2LaTBdHMKSKd9nuBrLBU=
-kevaso.com/core/sdk v0.0.0-20261113001111-13f70b119f73/go.mod h1:tjA8T9HJFP462IS5XW/xKtCjIRGQTQniEolxDhu+y1k=
+kevaso.com/core/sdk v0.0.0-20261113052900-b0b73da58df2 h1:yp/8zob+WYxwrlxCrFSTWP/bjCiJuPDjl9r3tgVaaVo=
+kevaso.com/core/sdk v0.0.0-20261113052900-b0b73da58df2/go.mod h1:tjA8T9HJFP462IS5XW/xKtCjIRGQTQniEolxDhu+y1k=
