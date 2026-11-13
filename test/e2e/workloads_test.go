@@ -79,6 +79,30 @@ http.server.ThreadingHTTPServer(("", %d), H).serve_forever()
 
 const pyImage = "docker.io/library/python:3.13-alpine"
 
+// portAsk is what a silo runs (python3 -c portAsk PORT open|close [?for=D]) to open or close one of
+// its leased ports on its local endpoint (core's ADR 0009): while the answer is 428 (waiting for a
+// person's yes) it asks again with the approval's name; it prints the last status and body, and
+// fails unless that was 200.
+const portAsk = `import sys, time, urllib.request, urllib.error
+port, op = sys.argv[1], sys.argv[2]
+url = "http://169.254.42.1/v1/ports/%s/%s%s" % (port, op, sys.argv[3] if len(sys.argv) > 3 else "")
+approval = ""
+while True:
+    u = url + (("&" if "?" in url else "?") + "approval=" + approval if approval else "")
+    req = urllib.request.Request(u, method="POST", headers={"Kevaso-Local": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(r.status, r.read().decode())
+            sys.exit(0)
+    except urllib.error.HTTPError as e:
+        if e.code == 428:
+            approval = e.headers.get("Kevaso-Approval", "")
+            time.sleep(2)
+            continue
+        print(e.code, e.read().decode())
+        sys.exit(1)
+`
+
 // banner dials addr and reads the debug server's hello: "" and an error when it's closed to us.
 func banner(addr string) (string, error) {
 	conn, err := net.DialTimeout("tcp", addr, 4*time.Second)
@@ -294,7 +318,7 @@ spec:
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("kvo open --for 10m: %v %s %s", err, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "more than its lease's max") {
+	if !strings.Contains(stderr.String(), "more than this port's lease max") {
 		t.Fatalf("no word of the max: stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 	l = c.lease(t, "api", "debug")
@@ -377,28 +401,23 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	c.mustKvo(t, "close", "silo", "narrow", "--port", "debug")
 	t.Log("sources without us: open on the host for that range only, closed to us")
 
-	// From inside the silo, through its broker socket: kvo-guest (the kevasod binary under that
-	// name, copied in with kvo cp).
-	for _, name := range []string{"api", "gated"} {
-		c.mustKvo(t, "cp", c.kevasod, "silo/"+name+":/tmp/kvo-guest")
-		c.mustKvo(t, "exec", "silo", name, "--", "chmod", "0755", "/tmp/kvo-guest")
+	// From inside the silo, on its local endpoint (core's ADR 0009: no helper in the silo).
+	if out := c.mustKvo(t, "exec", "silo", "api", "--", "python3", "-c", portAsk, "debug", "open", "?for=45s"); !strings.HasPrefix(out, "200 ") {
+		t.Fatalf("api's own open: %s", out)
 	}
-	if out := c.mustKvo(t, "exec", "silo", "api", "--", "/tmp/kvo-guest", "port", "open", "debug", "--for", "45s"); out == "" {
-		t.Log("kvo-guest port open: (no output)")
-	}
-	opens("api", "kvo-guest port open")
+	opens("api", "its own open on the endpoint")
 	if l := c.lease(t, "api", "debug"); !strings.Contains(l.Status.RequestedBy, "api") {
 		t.Logf("api's own lease, requested by %q", l.Status.RequestedBy)
 	}
-	c.mustKvo(t, "exec", "silo", "api", "--", "/tmp/kvo-guest", "port", "close", "debug")
-	closes("api", "kvo-guest port close", 20*time.Second)
+	c.mustKvo(t, "exec", "silo", "api", "--", "python3", "-c", portAsk, "debug", "close")
+	closes("api", "its own close on the endpoint", 20*time.Second)
 	type res struct {
 		out string
 		err error
 	}
 	done := make(chan res, 1)
 	go func() {
-		out, err := c.kvoe("exec", "silo", "gated", "--", "/tmp/kvo-guest", "port", "open", "debug", "--for", "45s", "--wait", "2m")
+		out, err := c.kvoe("exec", "silo", "gated", "--", "python3", "-c", portAsk, "debug", "open", "?for=45s")
 		done <- res{out, err}
 	}()
 	var pending string
@@ -414,16 +433,16 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	select {
 	case r := <-done:
 		if r.err != nil {
-			t.Fatalf("kvo-guest port open --wait: %v %s", r.err, r.out)
+			t.Fatalf("gated's own open, asked again until the yes: %v %s", r.err, r.out)
 		}
 	case <-time.After(time.Minute):
-		t.Fatal("kvo-guest port open --wait didn't return after the yes")
+		t.Fatal("gated's own open didn't return after the yes")
 	}
 	opens("gated", "its own ask approved")
 	c.mustKvo(t, "close", "silo", "gated", "--port", "debug")
 	closes("gated", "closed", 20*time.Second)
 	webUp("at the end")
-	t.Log("from inside: kvo-guest opened and closed api's port; gated's own ask waited for kvo approve")
+	t.Log("from inside, on the local endpoint: api opened and closed its port; gated's own ask waited for kvo approve")
 	for _, s := range silos {
 		c.mustKvo(t, "delete", "silo", s.name)
 	}
