@@ -10,7 +10,7 @@ require (
 	github.com/osrg/gobgp/v3 v3.37.0
 	golang.org/x/crypto v0.58.0
 	google.golang.org/protobuf v1.36.12
-	kevaso.com/core/sdk v0.0.0-20261113052900-b0b73da58df2
+	kevaso.com/core/sdk v0.0.0-20261113123851-584b083cafae
 )
 
 require (
