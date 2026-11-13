@@ -282,3 +282,14 @@ func TestNodeBalancerForAService(t *testing.T) {
 		t.Fatalf("backends: %v", got)
 	}
 }
+
+// linode-block is regional: a silo on it can move to another Linode in the region.
+func TestBlockIsRegional(t *testing.T) {
+	info, err := (&Provider{}).Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Storage) != 1 || info.Storage[0].Topology != kplugin.TopologyRegion {
+		t.Fatalf("storage classes %+v", info.Storage)
+	}
+}

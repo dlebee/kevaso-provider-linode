@@ -87,7 +87,10 @@ func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 			{Name: ClassNodeBalancer, Description: "a Linode NodeBalancer, to the silo's host over the private network", OwnHostsOnly: true, NodePorts: true},
 			{Name: ClassSharedIP, Description: "an IPv4 you own, shared between the region's Linodes, announced over BGP by the silo's host", OwnHostsOnly: true, Announce: true},
 		},
-		Storage: []kplugin.Class{{Name: ClassBlock, Description: "Linode Block Storage, attached to the silo's host", OwnHostsOnly: true}},
+		// Regional: a volume detaches and attaches to any Linode in its region, so a silo on it
+		// can move within the region (design §0.3).
+		Storage: []kplugin.Class{{Name: ClassBlock, Description: "Linode Block Storage, attached to the silo's host", OwnHostsOnly: true,
+			Topology: kplugin.TopologyRegion}},
 		DNS:     []string{DNSName}}, nil
 }
 
