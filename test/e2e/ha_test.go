@@ -198,7 +198,7 @@ func (h *ha) objects() []string {
 	for _, k := range []struct {
 		kind string
 		ns   bool
-	}{{"namespaces", false}, {"hosts", false}, {"clusterroles", false}, {"clusterrolebindings", false}, {"ippools", false},
+	}{{"namespaces", false}, {"hosts", false}, {"clusterroles", false}, {"clusterrolebindings", false},
 		{"roles", true}, {"rolebindings", true}, {"serviceaccounts", true}, {"secrets", true}, {"silos", true}} {
 		args := []string{"get", k.kind, "-o", "json"}
 		if k.ns {
