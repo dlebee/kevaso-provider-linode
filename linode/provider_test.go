@@ -160,6 +160,7 @@ func TestSharedIP(t *testing.T) {
 	f.addLinode(11, "ca-central", "172.105.1.1")
 	f.addLinode(12, "ca-central", "172.105.2.2")
 	f.shared[12] = []string{"172.105.9.9"} // already shares something else: kept
+	p.Adopt = []string{"172.105.3.63"}     // tagged for Kevaso (K-044)
 	hosts := []kplugin.HostInfo{{Name: "a", ID: "11", Region: "ca-central"}, {Name: "b", ID: "12", Region: "ca-central"}}
 	lb := kplugin.LoadBalancer{Class: ClassSharedIP, ID: "u", Address: "172.105.3.63", Backends: hosts[:1], Hosts: hosts,
 		Ports: []kplugin.Port{{Name: "p2p", Protocol: "UDP", Port: 30303}}}
@@ -382,8 +383,9 @@ func TestAddresses(t *testing.T) {
 	if err := p.ReleaseAddress(ctx, ref); !errors.Is(err, kplugin.ErrNotFound) {
 		t.Fatalf("release twice: %v", err)
 	}
-	// One already in the account: adopted, never given up.
+	// One already in the account, tagged for Kevaso: adopted, never given up.
 	f.addLinode(10, "ca-central", "172.105.3.63")
+	p.Adopt = []string{"172.105.3.63"}
 	own, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "own", Region: "ca-central", Address: "172.105.3.63"})
 	if err != nil || own.Address != "172.105.3.63" || !strings.HasPrefix(own.Handle, "adopted:") {
 		t.Fatalf("adopt: %+v %v", own, err)

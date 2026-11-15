@@ -120,6 +120,12 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			notFound()
 		}
+	case r.Method == "GET" && len(parts) == 4 && parts[0] == "networking" && parts[1] == "reserved" && parts[2] == "ips":
+		if ip, ok := f.ips[parts[3]]; ok && ip["reserved"] == true {
+			reply(ip)
+		} else {
+			notFound()
+		}
 	case r.Method == "POST" && p == "/networking/reserved/ips":
 		region, _ := body["region"].(string)
 		addr := fmt.Sprintf("172.105.200.%d", f.id()%250)

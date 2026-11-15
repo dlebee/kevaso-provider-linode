@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/linode/linodego"
@@ -16,9 +17,11 @@ import (
 //
 //   - linode-shared-ip reserves: a Linode reserved IPv4 in the IP's region (POST
 //     /networking/reserved/ips), which outlives every Linode; or, with an address asked for, an IPv4
-//     already in the account, adopted and never given up. Sharing it with the hosts is
+//     already in the account that is tagged for Kevaso (listed in the config's adopt: Linode's IP
+//     addresses carry no tags), adopted and never given up. Sharing it with the hosts is
 //     EnsureLoadBalancer's (the silo's host announces it); unsharing, DeleteLoadBalancer's.
-//     Releasing unshares it everywhere and, if it reserved it, deletes the reservation.
+//     Releasing unshares it everywhere and, if it reserved it, deletes the reservation. An address
+//     that is neither reserved nor tagged is never shared or unshared (K-044).
 //   - linode-nodebalancer can't: its address is the NodeBalancer's. One NodeBalancer per IP (its
 //     label carries the IP's UID), a config per port of every service on the IP (they share it by
 //     default), so it and its address last as long as the IP, across every backend change and
@@ -47,6 +50,9 @@ func (p *Provider) ReserveAddress(ctx context.Context, r kplugin.AddressReservat
 		addr, err := netip.ParseAddr(r.Address)
 		if err != nil || !addr.Is4() {
 			return kplugin.AddressStatus{}, fmt.Errorf("%s: %q isn't an IPv4", ClassSharedIP, r.Address)
+		}
+		if !p.tagged(addr.String()) {
+			return kplugin.AddressStatus{}, fmt.Errorf("%s: %s isn't tagged for Kevaso: only an address listed in the provider's config (\"adopt\") may be adopted; add it there and install the plugin again, or leave spec.address out to reserve a new one", ClassSharedIP, addr)
 		}
 		ip, err := p.API.GetIPAddress(ctx, addr.String())
 		if err != nil {
@@ -117,6 +123,32 @@ func (p *Provider) ReleaseAddress(ctx context.Context, ref kplugin.AddressRef) e
 	delete(p.reservedFor, ref.ID)
 	p.mu.Unlock()
 	return nil
+}
+
+// tagged: the address is tagged for Kevaso (listed in the config's adopt).
+func (p *Provider) tagged(addr string) bool { return slices.Contains(p.Adopt, addr) }
+
+// kevasos says whether Kevaso may share or unshare ip: a reserved address (one Kevaso reserved;
+// Linode marks them, and lists them under /networking/reserved/ips) or one tagged for it (K-044).
+// A machine's own address, or anything else of the account's, is left alone.
+func (p *Provider) kevasos(ctx context.Context, ip *linodego.InstanceIP) (bool, error) {
+	if ip.Reserved || p.tagged(ip.Address) {
+		return true, nil
+	}
+	p.mu.Lock()
+	for _, st := range p.reservedFor {
+		if st.Address == ip.Address {
+			p.mu.Unlock()
+			return true, nil
+		}
+	}
+	p.mu.Unlock()
+	if _, err := p.API.GetReservedIPAddress(ctx, ip.Address); err == nil {
+		return true, nil
+	} else if !isNotFound(err) {
+		return false, apiErr("reserved IP "+ip.Address, err)
+	}
+	return false, nil
 }
 
 // parkNodeBalancer keeps an IP's NodeBalancer, and so its address, with nothing behind it: no

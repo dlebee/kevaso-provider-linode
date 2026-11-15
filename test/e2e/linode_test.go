@@ -127,7 +127,8 @@ func TestLinode(t *testing.T) {
 
 	// 3. The plugin: controller side on the control plane (with the token), node side on the workers.
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
-	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.Tag, b.Tag+"-")), 0o644)
+	// The donor's address is tagged for Kevaso (adopt), so the IP object in step 6 may name it (K-044).
+	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q, "adopt": [%q]}`, b.Tag, b.Tag+"-", donor.Public)), 0o644)
 	t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin,
 		"--credential", "token=" + tokenFile, "--config", cfgFile}, ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")

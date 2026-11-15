@@ -216,6 +216,11 @@ func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) 
 	if err != nil {
 		return kplugin.LoadBalancerStatus{}, apiErr("IP address "+addr.String()+" (is it in this account?)", err)
 	}
+	if ok, err := p.kevasos(ctx, ip); err != nil {
+		return kplugin.LoadBalancerStatus{}, err
+	} else if !ok {
+		return kplugin.LoadBalancerStatus{}, fmt.Errorf("shared IP %s isn't tagged for Kevaso (neither reserved nor listed in the provider's config \"adopt\"): not sharing it", addr)
+	}
 	if len(lb.Backends) == 0 {
 		return kplugin.LoadBalancerStatus{}, fmt.Errorf("shared IP %s: no backend host", addr)
 	}
@@ -278,7 +283,8 @@ func (p *Provider) setShared(ctx context.Context, linode int, change func([]stri
 	return nil
 }
 
-// unshare stops sharing addr with every Linode in its region.
+// unshare stops sharing addr with every Linode in its region, if it is Kevaso's (reserved, or
+// tagged for it); any other address is left as it is.
 func (p *Provider) unshare(ctx context.Context, address string) error {
 	if address == "" {
 		return kplugin.ErrNotFound
@@ -286,6 +292,11 @@ func (p *Provider) unshare(ctx context.Context, address string) error {
 	ip, err := p.API.GetIPAddress(ctx, address)
 	if err != nil {
 		return apiErr("IP address "+address, err)
+	}
+	if ok, err := p.kevasos(ctx, ip); err != nil {
+		return err
+	} else if !ok {
+		return nil // not Kevaso's to unshare (K-044): letting it go leaves its sharing as it is
 	}
 	is, err := p.API.ListInstances(ctx, filter(map[string]any{"region": ip.Region}))
 	if err != nil {

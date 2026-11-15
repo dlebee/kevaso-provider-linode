@@ -52,6 +52,10 @@ type Config struct {
 	// LabelPrefix, if set, replaces the "kvo-" that starts the labels of the volumes and
 	// NodeBalancers it creates, for telling apart what several clusters made in one account.
 	LabelPrefix string `json:"labelPrefix,omitempty"`
+	// Adopt are the IPv4 addresses already in the account that an IP object of class
+	// linode-shared-ip may name (spec.address): the addresses tagged for Kevaso (Linode's IP
+	// addresses carry no tags of their own). Any other is refused, and never shared or unshared.
+	Adopt []string `json:"adopt,omitempty"`
 }
 
 // Provider is the Linode provider.
@@ -60,6 +64,8 @@ type Provider struct {
 	Tags []string // on everything created ("kevaso" first)
 	// LabelPrefix replaces "kvo-" at the start of the labels it gives (Config.LabelPrefix).
 	LabelPrefix string
+	// Adopt are the IPv4 addresses already in the account that are tagged for Kevaso (Config.Adopt).
+	Adopt []string
 	// AttachWait and DetachWait are how long one call waits for an attach or detach to finish
 	// before answering kplugin.ErrInProgress (default 20s each). DetachRetry is how long after
 	// asking for a detach it's asked again (one detach hung for over 5 minutes in E032; a second
@@ -108,7 +114,7 @@ const (
 
 // New returns a provider using token.
 func New(token string, cfg Config) *Provider {
-	return &Provider{API: NewClient(token), Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix}
+	return &Provider{API: NewClient(token), Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix, Adopt: cfg.Adopt}
 }
 
 // NewClient is the provider's Linode API client: bounded retries and request timeouts.
