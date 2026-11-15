@@ -323,9 +323,10 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 	if n := len(h.runVolumes(t)); n != 3 {
 		t.Errorf("%d Linode volumes (want data's, wal's and the hand-made one: nothing made beside it)", n)
 	}
-	if err := h.b.API.DeleteVolume(ctx, squat.ID); err != nil {
-		t.Fatalf("delete the hand-made volume: %v", err)
-	}
+	eventually(t, "the hand-made volume deleted (once Linode has it active)", 3*time.Minute, func() (bool, string) {
+		err := h.b.API.DeleteVolume(ctx, squat.ID)
+		return err == nil, fmt.Sprint(err)
+	})
 	eventually(t, "logs made once the label is free", 10*time.Minute, func() (bool, string) {
 		s, _ = h.volSilo(ns, "db")
 		ok := s.Status.Phase == "Running" && len(s.Status.Volumes) == 3
