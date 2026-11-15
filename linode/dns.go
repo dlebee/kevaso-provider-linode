@@ -83,6 +83,8 @@ func (rs recordSet) ownedBy(owner string) (bool, string) {
 
 // EnsureRecord implements kplugin.DNS: name/type gets exactly r.Values.
 func (p *Provider) EnsureRecord(ctx context.Context, r kplugin.Record) error {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	if r.Provider != DNSName && r.Provider != "" {
 		return fmt.Errorf("DNS provider %s: %w", r.Provider, kplugin.ErrUnsupported)
 	}
@@ -153,6 +155,8 @@ func (p *Provider) EnsureRecord(ctx context.Context, r kplugin.Record) error {
 // DeleteRecord implements kplugin.DNS: removes name/type, and the owner record once nothing of the
 // owner's is left there.
 func (p *Provider) DeleteRecord(ctx context.Context, r kplugin.Record) error {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	d, rel, err := p.zone(ctx, r.Name)
 	if err != nil {
 		return err

@@ -65,22 +65,66 @@ type Provider struct {
 	// asking for a detach it's asked again (one detach hung for over 5 minutes in E032; a second
 	// request went through in 20 s). Poll is how often it looks meanwhile.
 	AttachWait, DetachWait, DetachRetry, Poll time.Duration
+	// CallTimeout bounds every call core makes (default DefaultCallTimeout): past it the call
+	// gives up, says so, and core asks again later (audit K-041).
+	CallTimeout time.Duration
 
 	mu        sync.Mutex
 	detaching map[int]time.Time // volume → when its detach was last asked for
 	// reservedFor: the addresses reserved for each IP (by its UID), so asking again is idempotent.
 	reservedFor map[string]kplugin.AddressStatus
-	instances   []linodego.Instance
-	listed      time.Time
+	// listMu guards instances (one listing at a time; nothing else waits behind it).
+	listMu    sync.Mutex
+	instances []linodego.Instance
+	listed    time.Time
+	// sharing: one lock per Linode around a read-change-write of its shared-IP list (the API
+	// replaces the whole list, so two at once would lose one's change; audit K-055).
+	sharing map[int]*sync.Mutex
 }
+
+// sharingLock is the lock of a Linode's shared-IP list.
+func (p *Provider) sharingLock(linode int) *sync.Mutex {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sharing == nil {
+		p.sharing = map[int]*sync.Mutex{}
+	}
+	if p.sharing[linode] == nil {
+		p.sharing[linode] = &sync.Mutex{}
+	}
+	return p.sharing[linode]
+}
+
+// How long the Linode API gets (audit K-041): each request RequestTimeout, a busy or rate-limited
+// answer (429, 503, "Linode busy") tried again at most Retries times, waiting at most RetryWait
+// (Retry-After is respected up to that); and a whole call, waits for an attach or detach
+// included, at most DefaultCallTimeout. linodego's own default is 1000 retries, up to 30 s apart.
+const (
+	RequestTimeout     = 30 * time.Second
+	Retries            = 3
+	RetryWait          = 10 * time.Second
+	DefaultCallTimeout = 90 * time.Second
+)
 
 // New returns a provider using token.
 func New(token string, cfg Config) *Provider {
-	c := linodego.NewClient(&http.Client{Timeout: 60 * time.Second})
+	return &Provider{API: NewClient(token), Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix}
+}
+
+// NewClient is the provider's Linode API client: bounded retries and request timeouts.
+func NewClient(token string) *linodego.Client {
+	c := linodego.NewClient(&http.Client{Timeout: RequestTimeout})
 	c.SetToken(token)
 	c.SetUserAgent("kevaso-provider-linode/" + Version)
 	c.SetRetries()
-	return &Provider{API: &c, Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix}
+	c.SetRetryCount(Retries)
+	c.SetRetryMaxWaitTime(RetryWait)
+	return &c
+}
+
+// bound is the context of one call core makes: it ends after CallTimeout.
+func (p *Provider) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, p.dur(p.CallTimeout, DefaultCallTimeout))
 }
 
 // maxLabel is the longest label Linode takes on a volume or a NodeBalancer.
@@ -130,8 +174,8 @@ func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 
 // instancesNow lists the account's Linodes (cached for 30 s: describing many hosts is one call).
 func (p *Provider) instancesNow(ctx context.Context) ([]linodego.Instance, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.listMu.Lock()
+	defer p.listMu.Unlock()
 	if p.instances != nil && time.Since(p.listed) < 30*time.Second {
 		return p.instances, nil
 	}
@@ -148,6 +192,8 @@ var privateNet = netip.MustParsePrefix("192.168.128.0/17") // Linode private IPv
 // DescribeHosts implements kplugin.HostDescriber: a host is a Linode when one of its IPv4s is the
 // host's external or internal IP.
 func (p *Provider) DescribeHosts(ctx context.Context, hosts []kplugin.Host) ([]kplugin.HostInfo, error) {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	is, err := p.instancesNow(ctx)
 	if err != nil {
 		return nil, err
@@ -198,6 +244,10 @@ func apiErr(what string, err error) error {
 	var le *linodego.Error
 	if errors.As(err, &le) && le.Code == http.StatusNotFound {
 		return fmt.Errorf("%s: %w", what, kplugin.ErrNotFound)
+	}
+	// linodego reports a deadline as its own error, with the text only.
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		return fmt.Errorf("%s: gave up, the Linode API didn't answer within this call's deadline: %w", what, err)
 	}
 	return fmt.Errorf("%s: %w", what, err)
 }

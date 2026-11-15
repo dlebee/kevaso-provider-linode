@@ -25,6 +25,8 @@ func NodeBalancerLabel(id string) string {
 
 // EnsureLoadBalancer implements kplugin.LoadBalancers.
 func (p *Provider) EnsureLoadBalancer(ctx context.Context, lb kplugin.LoadBalancer) (kplugin.LoadBalancerStatus, error) {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	switch lb.Class {
 	case ClassNodeBalancer:
 		if len(lb.Backends) == 0 && len(lb.Ports) == 0 {
@@ -39,6 +41,8 @@ func (p *Provider) EnsureLoadBalancer(ctx context.Context, lb kplugin.LoadBalanc
 
 // DeleteLoadBalancer implements kplugin.LoadBalancers.
 func (p *Provider) DeleteLoadBalancer(ctx context.Context, ref kplugin.LoadBalancerRef) error {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	switch ref.Class {
 	case ClassNodeBalancer:
 		nb, err := p.findNodeBalancer(ctx, p.label(NodeBalancerLabel(ref.ID)))
@@ -250,6 +254,9 @@ func (p *Provider) ensureSharedIP(ctx context.Context, lb kplugin.LoadBalancer) 
 // setShared changes the list of IPs shared with a Linode (the API replaces the whole list).
 // change returns nil for "no change".
 func (p *Provider) setShared(ctx context.Context, linode int, change func([]string) []string) error {
+	l := p.sharingLock(linode)
+	l.Lock()
+	defer l.Unlock()
 	ips, err := p.API.GetInstanceIPAddresses(ctx, linode)
 	if err != nil {
 		return apiErr(fmt.Sprintf("Linode %d's IPs", linode), err)

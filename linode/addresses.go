@@ -33,6 +33,8 @@ const (
 
 // ReserveAddress implements kplugin.Addresses.
 func (p *Provider) ReserveAddress(ctx context.Context, r kplugin.AddressReservation) (kplugin.AddressStatus, error) {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	if r.Class != ClassSharedIP {
 		return kplugin.AddressStatus{}, fmt.Errorf("class %s holds no address apart from its load balancer: %w", r.Class, kplugin.ErrUnsupported)
 	}
@@ -80,6 +82,8 @@ func (p *Provider) ReserveAddress(ctx context.Context, r kplugin.AddressReservat
 
 // ReleaseAddress implements kplugin.Addresses.
 func (p *Provider) ReleaseAddress(ctx context.Context, ref kplugin.AddressRef) error {
+	ctx, cancel := p.bound(ctx)
+	defer cancel()
 	switch ref.Class {
 	case ClassNodeBalancer:
 		return p.DeleteLoadBalancer(ctx, kplugin.LoadBalancerRef{Class: ref.Class, ID: ref.ID})
