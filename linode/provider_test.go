@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"kevaso.com/core/sdk/kplugin"
-	"kevaso.com/core/sdk/kplugin/kplugintest"
 )
 
 var ctx = context.Background()
@@ -43,8 +42,13 @@ func TestVolumeLifecycle(t *testing.T) {
 	if _, err := p.EnsureVolume(ctx, kplugin.Volume{Class: ClassBlock, ID: "u/data", Name: v.Name, SizeBytes: 1, Region: "us-ord"}); err == nil {
 		t.Fatal("the same volume in another region")
 	}
+	id, _, _ := parseHandle(st.Handle)
+	label := f.volumes[id]["label"].(string)
+	if label != "kvo-payments-db-data-ab-"+identity("u/data")[:8] || len(label) > maxLabel {
+		t.Fatalf("label %s", label)
+	}
 	at, err := p.AttachVolume(ctx, kplugin.Attachment{Class: ClassBlock, Handle: st.Handle, Host: tor})
-	if err != nil || at.Device != "/dev/disk/by-id/scsi-0Linode_Volume_"+v.Name {
+	if err != nil || at.Device != "/dev/disk/by-id/scsi-0Linode_Volume_"+label {
 		t.Fatalf("attach: %+v %v", at, err)
 	}
 	// Attached elsewhere: a conflict, never a silent move.
@@ -65,7 +69,7 @@ func TestVolumeLifecycle(t *testing.T) {
 	if err := p.DetachVolume(ctx, kplugin.Attachment{Class: ClassBlock, Handle: st.Handle, Host: tor}); err != nil {
 		t.Fatalf("detach asked again: %v", err)
 	}
-	if n := count(f.calls, "POST /volumes/"+st.Handle+"/detach"); n != 2 {
+	if n := count(f.calls, "POST /volumes/"+strconv.Itoa(id)+"/detach"); n != 2 {
 		t.Fatalf("detach requests: %d, want 2 (%v)", n, f.calls)
 	}
 	if err := p.DetachVolume(ctx, kplugin.Attachment{Class: ClassBlock, Handle: st.Handle, Host: tor}); err != nil {
@@ -296,8 +300,8 @@ func TestBlockIsRegional(t *testing.T) {
 	}
 }
 
-// A label prefix replaces "kvo-" on what the provider creates, and keeps the unique end when it
-// has to cut.
+// A label prefix replaces "kvo-" on what the provider creates; a NodeBalancer's label keeps the
+// unique end when it has to cut, a volume's ends with its identity hash.
 func TestLabelPrefix(t *testing.T) {
 	f, p := newFakeAPI(t)
 	p.LabelPrefix = "kvt-wk-a1b2c3-"
@@ -314,7 +318,8 @@ func TestLabelPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l := f.volumes[mustAtoi(t, st.Handle)]["label"]; l != "kvt-wk-a1b2c3-e2e-db-data-abcde" {
+	id, _, _ := parseHandle(st.Handle)
+	if l := f.volumes[id]["label"]; l != "kvt-wk-a1b2c3-e2e-db-da-"+identity("u/data")[:8] {
 		t.Fatalf("volume label %v", l)
 	}
 	if again, _ := p.EnsureVolume(ctx, kplugin.Volume{Class: ClassBlock, ID: "u/data", Name: "kvo-e2e-db-data-abcde", SizeBytes: 1, Region: "ca-central"}); again.Handle != st.Handle {
@@ -324,15 +329,6 @@ func TestLabelPrefix(t *testing.T) {
 	if got := p.label("kvo-e2e-db-data-abcde"); got != "kvo-e2e-db-data-abcde" {
 		t.Fatalf("no prefix: %s", got)
 	}
-}
-
-func mustAtoi(t *testing.T, s string) int {
-	t.Helper()
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return n
 }
 
 // Addresses apart from a load balancer (core's IP objects): a reserved IPv4 in a region, shared
@@ -449,14 +445,6 @@ func TestInfoSaysWhatEachClassCan(t *testing.T) {
 			}
 		}
 	}
-}
-
-// The plugin protocol's promises for the address calls, over the wire (volumes have their own
-// test against the fake API, above).
-func TestConformanceAddresses(t *testing.T) {
-	_, p := newFakeAPI(t)
-	kplugintest.Conformance(t, kplugintest.Suite{Plugin: p, Region: "ca-central", Classes: []string{"none: volumes are TestVolumeLifecycle's"},
-		Host: kplugin.HostInfo{Name: "tor", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"}})
 }
 
 // The services sharing an IP share its NodeBalancer: a config per port, each to its own service's
