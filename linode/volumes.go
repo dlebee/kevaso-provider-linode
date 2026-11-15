@@ -80,6 +80,10 @@ func (p *Provider) volumeLabel(name, hash string) string {
 	return strings.TrimLeft(l, "-_")
 }
 
+// LabelFor is the Linode label EnsureVolume gives the volume v (core's ID and name): for finding
+// it in the account, and for tests.
+func (p *Provider) LabelFor(v kplugin.Volume) string { return p.volumeLabel(v.Name, identity(v.ID)) }
+
 // handle is what core keeps for a volume: LINODEID:HASH[:24].
 func handle(id int, hash string) string { return strconv.Itoa(id) + ":" + hash[:tagHash] }
 

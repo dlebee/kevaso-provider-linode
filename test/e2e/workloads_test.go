@@ -359,7 +359,15 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 		f := strings.Fields(out[strings.Index(out, "kvo approve ")+len("kvo approve "):])
 		return f[0]
 	}
-	if out, err := asOpener("approve", "nothing"); err == nil {
+	// A yes names the request it is for (core's K-017/K-059): its ID, from the REQUEST column.
+	requestOf := func(name string) string {
+		t.Helper()
+		lines := strings.Split(strings.TrimSpace(c.mustKvo(t, "get", "approval", name)), "\n")
+		f := strings.Fields(lines[len(lines)-1])
+		return f[len(f)-1]
+	}
+	approve := func(name string) { t.Helper(); c.mustKvo(t, "approve", name, "--request", requestOf(name)) }
+	if out, err := asOpener("approve", "nothing", "--request", "0000000000"); err == nil {
 		t.Fatalf("the service account answered an approval: %s", out)
 	}
 	appr := ask()
@@ -367,10 +375,10 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 		t.Fatalf("no pending ask: %+v", l.Status)
 	}
 	staysClosed("gated", "waiting for a yes", 10*time.Second)
-	if out, err := asOpener("approve", appr); err == nil {
+	if out, err := asOpener("approve", appr, "--request", requestOf(appr)); err == nil {
 		t.Fatalf("the asker approved its own ask: %s", out)
 	}
-	c.mustKvo(t, "approve", appr)
+	approve(appr)
 	opens("gated", "approved")
 	if l := c.lease(t, "gated", "debug"); l.Status.ApprovedBy == "" || l.Status.Phase != "Open" {
 		t.Fatalf("approved lease: %+v", l.Status)
@@ -429,7 +437,7 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 		return pending != "", fmt.Sprintf("%+v", l.Status)
 	})
 	staysClosed("gated", "its own ask, waiting", 6*time.Second)
-	c.mustKvo(t, "approve", pending)
+	approve(pending)
 	select {
 	case r := <-done:
 		if r.err != nil {
