@@ -296,22 +296,6 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 	}
 	t.Log("moved: the same two Linode volumes, now on " + other + ", with their data")
 
-	// wal out of the spec: its Linode volume deleted, data's kept (K-035's scenario on real volumes).
-	h.apply(t, dbYAML(ns, "data"))
-	walID := strings.Split(handles["wal"], ":")[0]
-	eventually(t, "wal's Linode volume deleted, data's kept", 10*time.Minute, func() (bool, string) {
-		now := h.runVolumes(t)
-		var ids []string
-		for _, v := range now {
-			ids = append(ids, strconv.Itoa(v.ID))
-		}
-		return len(now) == 1 && !slices.Contains(ids, walID), fmt.Sprint(ids)
-	})
-	if got := h.c.MustKvo("", "exec", "silo", "db", "-n", ns, "--", "cat", "/data/m"); strings.TrimSpace(got) != "d" {
-		t.Errorf("data after wal's removal: %q", got)
-	}
-	t.Log("wal removed from the spec: its Linode volume deleted; data's kept with its data")
-
 	// A label taken by a volume Kevaso didn't make: refused, never adopted.
 	p := &linode.Provider{LabelPrefix: labelPrefix}
 	s, _ = h.volSilo(ns, "db")
@@ -321,7 +305,7 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 		t.Fatalf("a volume labelled %s: %v", label, err)
 	}
 	t.Logf("made Linode volume %d labelled %s by hand (no identity tag)", squat.ID, label)
-	h.apply(t, dbYAML(ns, "data", "logs"))
+	h.apply(t, dbYAML(ns, "data", "wal", "logs"))
 	var refusal string
 	eventually(t, "logs refused: its label is taken", 5*time.Minute, func() (bool, string) {
 		_, out := h.volSilo(ns, "db")
@@ -336,21 +320,50 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 	if v, err := h.b.API.GetVolume(ctx, squat.ID); err != nil || v.LinodeID != nil || len(v.Tags) != 1 {
 		t.Errorf("the hand-made volume was touched: %+v %v", v, err)
 	}
-	if n := len(h.runVolumes(t)); n != 2 {
-		t.Errorf("%d Linode volumes (want data's and the hand-made one: nothing made beside it)", n)
+	if n := len(h.runVolumes(t)); n != 3 {
+		t.Errorf("%d Linode volumes (want data's, wal's and the hand-made one: nothing made beside it)", n)
 	}
 	if err := h.b.API.DeleteVolume(ctx, squat.ID); err != nil {
 		t.Fatalf("delete the hand-made volume: %v", err)
 	}
 	eventually(t, "logs made once the label is free", 10*time.Minute, func() (bool, string) {
 		s, _ = h.volSilo(ns, "db")
-		ok := s.Status.Phase == "Running" && len(s.Status.Volumes) == 2
+		ok := s.Status.Phase == "Running" && len(s.Status.Volumes) == 3
 		for _, v := range s.Status.Volumes {
 			ok = ok && v.Mounted
 		}
 		return ok, fmt.Sprintf("%+v", s.Status.Volumes)
 	})
 	t.Log("once the hand-made volume was gone, logs got a volume of its own")
+
+	// wal out of the spec: its Linode volume deleted, data's kept (K-035's scenario on real volumes).
+	h.apply(t, dbYAML(ns, "data", "logs"))
+	walID := strings.Split(handles["wal"], ":")[0]
+	walGone, last := false, ""
+	for deadline := time.Now().Add(6 * time.Minute); time.Now().Before(deadline) && !walGone; time.Sleep(10 * time.Second) {
+		walGone, last = func() (bool, string) {
+			now := h.runVolumes(t)
+			var ids []string
+			for _, v := range now {
+				ids = append(ids, fmt.Sprintf("%d attached=%v", v.ID, v.LinodeID))
+			}
+			s, _ := h.volSilo(ns, "db")
+			var mounts string
+			if s.Status.Host != "" {
+				mounts, _ = h.sh(s.Status.Host, "findmnt -rn -o TARGET,SOURCE | grep kevaso | grep -v overlay | head; docker ps --filter label=kevaso.com/name=db --format '{{.ID}} {{.Status}}'")
+			}
+			return !strings.Contains(fmt.Sprint(ids), walID+" "), fmt.Sprintf("Linode %v; status.volumes %+v; on %s: %s", ids, s.Status.Volumes, s.Status.Host, strings.ReplaceAll(mounts, "\n", " | "))
+		}()
+	}
+	if !walGone {
+		t.Errorf("FINDING (core): wal removed from a running silo's spec: its Linode volume not deleted in 6 minutes: %s", last)
+	}
+	if got := h.c.MustKvo("", "exec", "silo", "db", "-n", ns, "--", "cat", "/data/m"); strings.TrimSpace(got) != "d" {
+		t.Errorf("data after wal's removal: %q", got)
+	}
+	if walGone {
+		t.Log("wal removed from the spec: its Linode volume deleted; data's kept with its data")
+	}
 
 	// Deleted with the silo, and only then.
 	before := h.runVolumes(t)
