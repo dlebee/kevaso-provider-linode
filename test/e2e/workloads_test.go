@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -362,14 +363,12 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	// A yes names the request it is for (core's K-017/K-059): its ID, from the REQUEST column.
 	requestOf := func(name string) string {
 		t.Helper()
-		lines := strings.Split(strings.TrimSpace(c.mustKvo(t, "get", "approval", name)), "\n")
-		head, row := strings.Fields(lines[0]), strings.Fields(lines[len(lines)-1])
-		for i, col := range head {
-			if col == "REQUEST" && len(row) == len(head) {
-				return row[i]
-			}
+		out := c.mustKvo(t, "get", "approval", name)
+		// The REQUEST column: the request's digest, 32 hex digits (other cells have spaces in them).
+		if m := regexp.MustCompile(`(?m)\b[0-9a-f]{32}\b`).FindString(out); m != "" {
+			return m
 		}
-		t.Fatalf("no REQUEST column in kvo get approval %s:\n%s", name, strings.Join(lines, "\n"))
+		t.Fatalf("no request ID in kvo get approval %s:\n%s", name, out)
 		return ""
 	}
 	approve := func(name string) { t.Helper(); c.mustKvo(t, "approve", name, "--request", requestOf(name)) }

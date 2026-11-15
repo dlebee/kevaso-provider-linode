@@ -365,23 +365,23 @@ spec:
 	})
 	down := time.Now()
 	t.Logf("%s (Linode %d) powered off", h, c.host(h).ID)
-	sawFencing := false
+	// Core says a silent host on the silo (HostUnreachable, since when, and what the control plane
+	// waits for) before it starts the opted-in silo elsewhere.
+	unreachable := ""
 	c.eventually(t, "ha running on "+o+" after losing "+h, 8*time.Minute, func() (bool, string) {
 		s, err := c.silo("ha")
-		if _, r := s.cond("HostLost"); r == "Fencing" {
-			sawFencing = true
+		if st, r := s.cond("HostUnreachable"); st == "True" && unreachable == "" {
+			unreachable = r
 		}
 		return err == nil && s.Status.Host == o && s.Status.Phase == "Running", fmt.Sprintf("%+v %v", s.Status, err)
 	})
 	gap := w.stop(t, h, o)
-	if !sawFencing {
-		t.Error("ha never showed HostLost/Fencing before it moved")
+	if unreachable == "" {
+		t.Error("ha never said HostUnreachable before it was started elsewhere")
+	} else {
+		t.Logf("ha said HostUnreachable (%s) before it was started elsewhere", unreachable)
 	}
 	hasProof("ha")
-	ha, _ = c.silo("ha")
-	if _, r := ha.cond("HostLost"); r != "Moved" {
-		t.Errorf("ha's HostLost reason %q, want Moved", r)
-	}
 	t.Logf("ha came up on %s with its file %s after %s was powered off (%s between copies), after fencing", o, time.Since(down).Round(time.Second), h, gap.Round(time.Millisecond))
 
 	keep, _ = c.silo("keep")
