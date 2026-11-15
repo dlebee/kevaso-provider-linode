@@ -1214,12 +1214,23 @@ func ha3Wipe(t *testing.T, h *ha3) {
 	journal, _ := h.sh(y, "journalctl -u kevasod -b --no-pager | grep -v heartbeat | tail -25")
 	t.Logf("e: %s, %s after boot: kevasod %s\njournal:\n%s", y, time.Since(bootAt).Round(time.Second), strings.TrimSpace(state), journal)
 	refused := regexp.MustCompile(`(?i)not starting|refus|belongs to`).FindString(journal) != ""
-	says := strings.Contains(journal, "kvoadm")
+	says := strings.Contains(journal, "kvoadm host remove")
+	if strings.Contains(journal, "kvoadm init creates") {
+		t.Errorf("e: %s, one of three system nodes, is told to run kvoadm init (a second cluster)", y)
+	}
+	restarts := strings.Fields(state)
+	if len(restarts) > 1 {
+		if n, err := strconv.Atoi(restarts[1]); err == nil && n > 3 {
+			t.Errorf("e: kevasod on %s restarted %d times after refusing", y, n)
+		} else {
+			t.Logf("e: kevasod on %s restarted %s times after refusing", y, restarts[1])
+		}
+	}
 	if !refused {
 		t.Errorf("e: %s with a wiped data directory: no refusal in its journal", y)
 	}
 	if !says {
-		t.Errorf("e: %s's refusal doesn't say what to do (no kvoadm command in it)", y)
+		t.Errorf("e: %s's refusal doesn't say to remove it and add it again (kvoadm host remove …)", y)
 	}
 	if strings.Contains(state, "member") && !strings.Contains(state, "No such file") {
 		t.Errorf("e: %s made a store after the wipe: %s", y, state)
@@ -1343,6 +1354,9 @@ func ha3Restore(t *testing.T, h *ha3) {
 		st, _, msg := condition(h.hosts(t)["w1"], "KeptSilos")
 		return st == "True" && strings.Contains(msg, ns+"/late"), st + " " + msg
 	})
+	if _, _, msg := condition(h.hosts(t)["w1"], "KeptSilos"); !strings.Contains(msg, late.Metadata.UID[:8]) {
+		t.Errorf("f: KeptSilos doesn't name late by its UID (%s…): %s", late.Metadata.UID[:8], msg)
+	}
 	_, _, kept := condition(h.hosts(t)["w1"], "KeptSilos")
 	t.Logf("f: workers took the restore as a new history; late kept running on w1 with its volume's data; w1 says: %s", kept)
 	j, _ := h.sh("w1", "journalctl -u kevasod --no-pager --since '-15min' | grep -i keeping | tail -3")

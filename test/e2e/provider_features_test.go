@@ -340,30 +340,48 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 	// wal out of the spec: its Linode volume deleted, data's kept (K-035's scenario on real volumes).
 	h.apply(t, dbYAML(ns, "data", "logs"))
 	walID := strings.Split(handles["wal"], ":")[0]
+	// A container's mounts can't change: core keeps wal mounted until the container is made again,
+	// and says so (Updated=False, VolumeRemovalWaits, naming wal); kvo reset makes it again.
+	eventually(t, "db says wal waits for the container to be made again", 3*time.Minute, func() (bool, string) {
+		s, out := h.volSilo(ns, "db")
+		for _, c := range s.Status.Conditions {
+			if c.Type == "Updated" && c.Status == "False" && c.Reason == "VolumeRemovalWaits" && strings.Contains(c.Message, "wal") {
+				t.Logf("db: Updated False VolumeRemovalWaits: %s", c.Message)
+				return true, ""
+			}
+		}
+		return false, firstLine(out) + fmt.Sprintf(" %+v", s.Status.Conditions)
+	})
+	t.Log(h.c.MustKvo("", "reset", "silo", "db", "-n", ns))
 	walGone, last := false, ""
-	for deadline := time.Now().Add(6 * time.Minute); time.Now().Before(deadline) && !walGone; time.Sleep(10 * time.Second) {
+	for deadline := time.Now().Add(8 * time.Minute); time.Now().Before(deadline) && !walGone; time.Sleep(10 * time.Second) {
 		walGone, last = func() (bool, string) {
 			now := h.runVolumes(t)
 			var ids []string
 			for _, v := range now {
-				ids = append(ids, fmt.Sprintf("%d attached=%v", v.ID, v.LinodeID))
+				ids = append(ids, fmt.Sprintf("%d attached=%v", v.ID, v.LinodeID != nil))
 			}
 			s, _ := h.volSilo(ns, "db")
 			var mounts string
 			if s.Status.Host != "" {
-				mounts, _ = h.sh(s.Status.Host, "findmnt -rn -o TARGET,SOURCE | grep kevaso | grep -v overlay | head; docker ps --filter label=kevaso.com/name=db --format '{{.ID}} {{.Status}}'")
+				mounts, _ = h.sh(s.Status.Host, "findmnt -rn -o TARGET | grep '/wal$' || echo 'wal not mounted'")
 			}
-			return !strings.Contains(fmt.Sprint(ids), walID+" "), fmt.Sprintf("Linode %v; status.volumes %+v; on %s: %s", ids, s.Status.Volumes, s.Status.Host, strings.ReplaceAll(mounts, "\n", " | "))
+			inStatus := false
+			for _, v := range s.Status.Volumes {
+				inStatus = inStatus || v.Name == "wal"
+			}
+			return !strings.Contains(fmt.Sprint(ids), walID+" ") && strings.Contains(mounts, "wal not mounted") && !inStatus,
+				fmt.Sprintf("Linode %v; status.volumes %+v; on %s: %s", ids, s.Status.Volumes, s.Status.Host, strings.TrimSpace(mounts))
 		}()
 	}
 	if !walGone {
-		t.Errorf("FINDING (core): wal removed from a running silo's spec: its Linode volume not deleted in 6 minutes: %s", last)
+		t.Errorf("wal dropped and db reset: not unmounted, let go and deleted in 8 minutes: %s", last)
 	}
 	if got := h.c.MustKvo("", "exec", "silo", "db", "-n", ns, "--", "cat", "/data/m"); strings.TrimSpace(got) != "d" {
 		t.Errorf("data after wal's removal: %q", got)
 	}
 	if walGone {
-		t.Log("wal removed from the spec: its Linode volume deleted; data's kept with its data")
+		t.Log("wal dropped, db reset: unmounted on the worker, gone from status, its Linode volume detached and deleted; data's kept with its data")
 	}
 
 	// Deleted with the silo, and only then.
