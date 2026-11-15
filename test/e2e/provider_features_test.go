@@ -72,12 +72,12 @@ func TestProvider(t *testing.T) {
 	labelPrefix := b.Tag + "-"
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
 	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.Tag, labelPrefix)), 0o644)
-	t.Log(h.mustKvoadm("", append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin,
+	t.Log(h.mustKvoadm("", append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
 		"--credential", "token=" + tokenFile, "--config", cfgFile}, h.ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
 	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []string{"w1", "w2"} {
-		t.Log(h.mustKvoadm("", append([]string{"plugin", "install", "root@" + h.ms[w].Public, "--name", "linode", "--binary", plugin,
+		t.Log(h.mustKvoadm("", append([]string{"plugin", "install", "root@" + h.ms[w].Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
 			"--side", "node", "--config", nodeCfg}, h.ssh...)...))
 	}
 

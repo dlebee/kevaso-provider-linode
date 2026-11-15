@@ -46,7 +46,9 @@ On a Linode's public interface the public IPv4 is on the interface itself, so `h
 opens on it. The provider and its tests only use Linodes with that interface (public plus the
 optional private IPv4); a VPC interface whose public address is a 1:1 NAT hasn't been tried.
 
-Install with `kvoadm plugin install`; the user guide is
+Install with `kvoadm plugin install --manifest kevaso-plugin.json` on each side: the manifest says
+where its volumes' devices are (`/dev/disk/by-id/scsi-0Linode_Volume_…`), and kevasod refuses any
+other device it answers, or every one if it was installed without the manifest. The user guide is
 [dlebee.github.io/kevaso-docs/providers/linode](https://dlebee.github.io/kevaso-docs/providers/linode/).
 
 ## Build

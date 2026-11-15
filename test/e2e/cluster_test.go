@@ -127,12 +127,12 @@ func (c *fleet) install(t *testing.T) {
 	}
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
 	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.Tag, b.Tag+"-")), 0o644)
-	t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + c.cp.Public, "--name", "linode", "--binary", c.plugin,
+	t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + c.cp.Public, "--name", "linode", "--binary", c.plugin, "--manifest", manifestFile(t),
 		"--credential", "token=" + os.Getenv("KEVASO_LINODE_TOKEN_FILE"), "--config", cfgFile}, c.ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
 	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []machine{c.w1, c.w2} {
-		t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", c.plugin,
+		t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", c.plugin, "--manifest", manifestFile(t),
 			"--side", "node", "--config", nodeCfg}, c.ssh...)...))
 	}
 	c.eventually(t, "the workers Ready and recognised as Linodes", 4*time.Minute, func() (bool, string) {

@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -61,4 +62,15 @@ func TestLeftovers(t *testing.T) {
 	if len(left) > 0 {
 		t.Errorf("left in the account: %v", left)
 	}
+}
+
+// manifestFile is the plugin's manifest (kvoadm plugin install --manifest): where its volumes'
+// devices are, which kevasod checks its answers against (core's K-038).
+func manifestFile(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("..", "..", "kevaso-plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

@@ -129,12 +129,12 @@ func TestLinode(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
 	// The donor's address is tagged for Kevaso (adopt), so the IP object in step 6 may name it (K-044).
 	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q, "adopt": [%q]}`, b.Tag, b.Tag+"-", donor.Public)), 0o644)
-	t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin,
+	t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
 		"--credential", "token=" + tokenFile, "--config", cfgFile}, ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
 	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []machine{w1, w2} {
-		t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", plugin,
+		t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
 			"--side", "node", "--config", nodeCfg}, ssh...)...))
 	}
 	// The token is on the control plane only, readable by root only.
