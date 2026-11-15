@@ -74,7 +74,7 @@ func newCluster(t *testing.T, ctx context.Context, b *bed) *fleet {
 	}
 	ch := make(chan made, 3)
 	for _, role := range []string{"cp", "w1", "w2"} {
-		go func() { ch <- made{role, b.Create(ctx, role)} }()
+		go func() { ch <- made{role, b.CreateSteady(ctx, role)} }()
 	}
 	ms := map[string]machine{}
 	for i := 0; i < 3; i++ {
