@@ -148,13 +148,21 @@ func (h *ha) one(ctx context.Context, m machine, name string) string {
 	return cs[0]
 }
 
+// hosts lists the hosts, asking up to three times: with one system node, a busy one answers a
+// read after kvo's 6 s deadline now and then (core b10eb76), and there is no other to fail over to.
 func (h *ha) hosts() map[string]hostView {
 	h.t.Helper()
-	hs, err := h.c.Hosts()
-	if err != nil {
-		h.t.Fatalf("kvo get hosts: %v", err)
+	var err error
+	for i := 0; i < 3; i++ {
+		var hs map[string]hostView
+		if hs, err = h.c.Hosts(); err == nil {
+			return hs
+		}
+		h.t.Logf("kvo get hosts (try %d): %v", i+1, err)
+		time.Sleep(5 * time.Second)
 	}
-	return hs
+	h.t.Fatalf("kvo get hosts: %v", err)
+	return nil
 }
 
 // leaders are the hosts that say they hold the controllers' lease, among names.
@@ -221,8 +229,8 @@ func haLight(t *testing.T, ctx context.Context, b *bed, k *kit, kevasod string) 
 	c, ms, ssh := h.c, h.ms, b.SSHFlags()
 
 	// 7. Started on SQLite, with objects and a worker, then switched to etcd.
-	t.Log(c.MustKvoadm(append([]string{"init", "root@" + ms["m1"].Public, "--external-ip", ms["m1"].Public, "--kevasod", kevasod, "--name", "m1", "--cluster", "mig",
-		"--api-server", "https://" + ms["m1"].Public + ":6443"}, ssh...)...))
+	t.Log(redact(c.MustKvoadm(append([]string{"init", "root@" + ms["m1"].Public, "--external-ip", ms["m1"].Public, "--kevasod", kevasod, "--name", "m1", "--cluster", "mig",
+		"--api-server", "https://" + ms["m1"].Public + ":6443"}, ssh...)...)))
 	if cp := h.hosts()["m1"].Status.ControlPlane; cp == nil || cp.Store != "sqlite" {
 		t.Fatalf("m1's store: %+v", cp)
 	}
