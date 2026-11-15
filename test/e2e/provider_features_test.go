@@ -72,8 +72,10 @@ func TestProvider(t *testing.T) {
 	labelPrefix := b.Tag + "-"
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
 	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.Tag, labelPrefix)), 0o644)
+	h.c.MustKvo("", "create", "clustersecret", "token", "--from-file", tokenFile)
+	h.c.MustKvo(grantClusterSecrets("linode", "token"), "apply", "-f", "-")
 	t.Log(h.mustKvoadm("", append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
-		"--credential", "token=" + tokenFile, "--config", cfgFile}, h.ssh...)...))
+		"--cluster-secret", "token", "--config", cfgFile}, h.ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
 	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []string{"w1", "w2"} {

@@ -99,7 +99,7 @@ func credential(name string) (string, error) {
 	} else if f := os.Getenv("KEVASO_LINODE_TOKEN_FILE"); f != "" {
 		path = f
 	} else {
-		return "", errors.New("no Linode token: run under systemd with LoadCredential=token:FILE (kvoadm plugin install --credential token=FILE)")
+		return "", errors.New("no Linode token: run under systemd with LoadCredential=token:FILE (kvoadm plugin install --cluster-secret token)")
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

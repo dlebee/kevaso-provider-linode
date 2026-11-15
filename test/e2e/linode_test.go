@@ -129,18 +129,21 @@ func TestLinode(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
 	// The donor's address is tagged for Kevaso (adopt), so the IP object in step 6 may name it (K-044).
 	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q, "adopt": [%q]}`, b.Tag, b.Tag+"-", donor.Public)), 0o644)
+	must("", kvo, "create", "clustersecret", "token", "--from-file", tokenFile)
+	must(grantClusterSecrets("linode", "token"), kvo, "apply", "-f", "-")
 	t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + cp.Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
-		"--credential", "token=" + tokenFile, "--config", cfgFile}, ssh...)...))
+		"--cluster-secret", "token", "--config", cfgFile}, ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
 	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []machine{w1, w2} {
 		t.Log(must("", kvoadm, append([]string{"plugin", "install", "root@" + w.Public, "--name", "linode", "--binary", plugin, "--manifest", manifestFile(t),
 			"--side", "node", "--config", nodeCfg}, ssh...)...))
 	}
-	// The token is on the control plane only, readable by root only.
-	if out, _ := b.SSH(ctx, cp, "stat -c '%a %U' /etc/kevaso/plugins/linode/token"); strings.TrimSpace(out) != "600 root" {
-		t.Fatalf("token file: %q", out)
-	}
+	// kevasod fetches the token after install and caches it root-only on the control plane.
+	eventually("the token cached on the control plane", 2*time.Minute, func() (bool, string) {
+		out, err := b.SSH(ctx, cp, "stat -c '%a %U' /etc/kevaso/plugins/linode/token")
+		return strings.TrimSpace(out) == "600 root", fmt.Sprintf("%q %v", strings.TrimSpace(out), err)
+	})
 	if out, _ := b.SSH(ctx, w1, "ls /etc/kevaso/plugins/linode/"); strings.Contains(out, "token") {
 		t.Fatal("a worker got the token")
 	}
