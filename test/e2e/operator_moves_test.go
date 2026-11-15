@@ -305,13 +305,15 @@ spec:
     image: %s
     command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
   resources: { memory: 64Mi }
-  availability: { onHostLoss: %s }
+  availability: { %s }
   volumes:
     - { name: data, class: linode-block, size: 10Gi, mountPath: /data }
 `, name, pyImage, policy)
 	}
-	c.apply(t, vol("keep", "Wait"))
-	c.apply(t, vol("ha", "Move"))
+	// §0.7: only a silo that asks to stop without the control plane (onControlPlaneLoss: Stop) is
+	// started elsewhere when its host is lost; keep (no opt-in) waits for its host.
+	c.apply(t, vol("keep", "onHostLoss: Wait"))
+	c.apply(t, vol("ha", "onHostLoss: Move, onControlPlaneLoss: Stop, after: 30s"))
 	proof := map[string]string{}
 	for _, name := range []string{"keep", "ha"} {
 		s := c.running(t, name, 10*time.Minute)

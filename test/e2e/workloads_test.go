@@ -363,8 +363,14 @@ subjects: [{ kind: ServiceAccount, name: opener }]
 	requestOf := func(name string) string {
 		t.Helper()
 		lines := strings.Split(strings.TrimSpace(c.mustKvo(t, "get", "approval", name)), "\n")
-		f := strings.Fields(lines[len(lines)-1])
-		return f[len(f)-1]
+		head, row := strings.Fields(lines[0]), strings.Fields(lines[len(lines)-1])
+		for i, col := range head {
+			if col == "REQUEST" && len(row) == len(head) {
+				return row[i]
+			}
+		}
+		t.Fatalf("no REQUEST column in kvo get approval %s:\n%s", name, strings.Join(lines, "\n"))
+		return ""
 	}
 	approve := func(name string) { t.Helper(); c.mustKvo(t, "approve", name, "--request", requestOf(name)) }
 	if out, err := asOpener("approve", "nothing", "--request", "0000000000"); err == nil {
