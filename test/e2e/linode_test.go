@@ -315,7 +315,7 @@ spec:
     image: docker.io/library/nginx:1.27-alpine
     command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
   resources: { cpu: 1, memory: 256Mi }
-  availability: { onHostLoss: Recreate }
+  availability: { onHostLoss: Recreate, onControlPlaneLoss: Stop, after: 30s }
   ports: [{ name: http, port: 80 }]
   service:
     ports: [{ port: http, loadBalancer: true }]
