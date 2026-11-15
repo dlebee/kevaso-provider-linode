@@ -317,10 +317,58 @@ func (b *Bed) SSHCmd(ctx context.Context, m Machine, cmd string) *exec.Cmd {
 		"-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=ERROR", "root@"+m.Public, cmd)
 }
 
+// Resources are the account's resources a test can make, by kind.
+type Resources struct {
+	Instances     []linodego.Instance
+	Volumes       []linodego.Volume
+	NodeBalancers []linodego.NodeBalancer
+	Domains       []linodego.Domain
+	Firewalls     []linodego.Firewall
+	VPCs          []linodego.VPC
+}
+
+// Lines says what r holds, one "kind label" per resource.
+func (r Resources) Lines() []string {
+	var out []string
+	for _, in := range r.Instances {
+		out = append(out, "Linode "+in.Label)
+	}
+	for _, v := range r.Volumes {
+		out = append(out, "volume "+v.Label)
+	}
+	for _, nb := range r.NodeBalancers {
+		out = append(out, "NodeBalancer "+*nb.Label)
+	}
+	for _, d := range r.Domains {
+		out = append(out, "domain "+d.Domain)
+	}
+	for _, f := range r.Firewalls {
+		out = append(out, "firewall "+f.Label)
+	}
+	for _, v := range r.VPCs {
+		out = append(out, "VPC "+v.Label)
+	}
+	return out
+}
+
 // Owned lists the account's resources that owns says are the test's: Linodes, volumes,
-// NodeBalancers and domains (a domain by its first label, the zone being TAG.kevaso.com).
+// NodeBalancers, domains (a domain by its first label, the zone being TAG.kevaso.com),
+// firewalls and VPCs.
 func (b *Bed) Owned(ctx context.Context, owns func(label string, tags []string) bool) (ins []linodego.Instance,
 	vols []linodego.Volume, nbs []linodego.NodeBalancer, ds []linodego.Domain, err error) {
+	r, err := b.OwnedAll(ctx, owns)
+	return r.Instances, r.Volumes, r.NodeBalancers, r.Domains, err
+}
+
+// OwnedAll is Owned with every kind.
+func (b *Bed) OwnedAll(ctx context.Context, owns func(label string, tags []string) bool) (r Resources, err error) {
+	var (
+		ins  []linodego.Instance
+		vols []linodego.Volume
+		nbs  []linodego.NodeBalancer
+		ds   []linodego.Domain
+	)
+	defer func() { r.Instances, r.Volumes, r.NodeBalancers, r.Domains = ins, vols, nbs, ds }()
 	all, err := b.API.ListInstances(ctx, nil)
 	if err != nil {
 		return
@@ -353,7 +401,21 @@ func (b *Bed) Owned(ctx context.Context, owns func(label string, tags []string) 
 			}
 		}
 	}
-	return ins, vols, nbs, ds, nil
+	if fws, e := b.API.ListFirewalls(ctx, nil); e == nil { // the token may lack the scope
+		for _, f := range fws {
+			if owns(f.Label, f.Tags) {
+				r.Firewalls = append(r.Firewalls, f)
+			}
+		}
+	}
+	if vpcs, e := b.API.ListVPCs(ctx, nil); e == nil { // VPCs have no tags: by label only
+		for _, v := range vpcs {
+			if owns(v.Label, nil) {
+				r.VPCs = append(r.VPCs, v)
+			}
+		}
+	}
+	return r, nil
 }
 
 // RunOwns says whether a resource (its label and tags) is the run's (runOwns).
@@ -374,10 +436,11 @@ func (b *Bed) Sweep(ctx context.Context) []string {
 // Delete deletes what owns says is the test's; a volume still attached is detached, and deleted
 // on a later round.
 func (b *Bed) Delete(ctx context.Context, owns func(string, []string) bool) (found []string) {
-	ins, vols, nbs, ds, err := b.Owned(ctx, owns)
+	r, err := b.OwnedAll(ctx, owns)
 	if err != nil {
 		return []string{"listing failed: " + err.Error()}
 	}
+	ins, vols, nbs, ds := r.Instances, r.Volumes, r.NodeBalancers, r.Domains
 	for _, nb := range nbs {
 		found = append(found, "NodeBalancer "+*nb.Label)
 		_ = b.API.DeleteNodeBalancer(ctx, nb.ID)
@@ -398,29 +461,43 @@ func (b *Bed) Delete(ctx context.Context, owns func(string, []string) bool) (fou
 		found = append(found, "domain "+d.Domain)
 		_ = b.API.DeleteDomain(ctx, d.ID)
 	}
+	for _, f := range r.Firewalls {
+		found = append(found, "firewall "+f.Label)
+		_ = b.API.DeleteFirewall(ctx, f.ID) // its devices go with it
+	}
+	if len(ins) == 0 { // a VPC goes once no Linode of the run is on its subnets
+		for _, v := range r.VPCs {
+			found = append(found, "VPC "+v.Label)
+			_ = b.API.DeleteVPC(ctx, v.ID)
+		}
+	}
 	return found
 }
 
 // Remaining lists what of the run is still in the account (after a sweep: should be nothing).
 func (b *Bed) Remaining(ctx context.Context) []string {
-	ins, vols, nbs, ds, err := b.Owned(ctx, b.RunOwns)
+	r, err := b.OwnedAll(ctx, b.RunOwns)
 	if err != nil {
 		return []string{"listing failed: " + err.Error()}
 	}
-	var out []string
-	for _, in := range ins {
-		out = append(out, "Linode "+in.Label)
+	return r.Lines()
+}
+
+// Leftovers lists, deleting nothing, every resource in the account whose label starts with kvt-
+// or kevaso-e2e- (any family, any run), and how many reserved IPv4 addresses the account holds
+// (they carry no label: a test that reserved one releases it itself).
+func (b *Bed) Leftovers(ctx context.Context) ([]string, int, error) {
+	r, err := b.OwnedAll(ctx, func(label string, _ []string) bool {
+		return strings.HasPrefix(label, "kvt-") || strings.HasPrefix(label, "kevaso-e2e-")
+	})
+	if err != nil {
+		return nil, 0, err
 	}
-	for _, v := range vols {
-		out = append(out, "volume "+v.Label)
+	reserved, err := b.API.ListReservedIPAddresses(ctx, nil)
+	if err != nil {
+		return r.Lines(), -1, nil // the token may lack the scope
 	}
-	for _, nb := range nbs {
-		out = append(out, "NodeBalancer "+*nb.Label)
-	}
-	for _, d := range ds {
-		out = append(out, "domain "+d.Domain)
-	}
-	return out
+	return r.Lines(), len(reserved), nil
 }
 
 // Lookup asks Linode's own name server directly (the test zone isn't delegated).

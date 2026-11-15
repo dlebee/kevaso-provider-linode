@@ -3,8 +3,10 @@
 package e2e
 
 import (
+	"context"
 	"os"
 	"testing"
+	"time"
 
 	"kevaso.com/provider-linode/linodetest"
 )
@@ -36,4 +38,27 @@ func TestSweep(t *testing.T) {
 		t.Skip("KEVASO_E2E_SWEEP and KEVASO_LINODE_TOKEN_FILE not set")
 	}
 	linodetest.SweepFamily(t, prefix, tokenFile)
+}
+
+// TestLeftovers lists (deletes nothing) every kvt- or kevaso-e2e- resource in the account, of any
+// run: what each turn ends with, to show the account is clean.
+//
+//	KEVASO_LINODE_TOKEN_FILE=… go test -tags e2e -run TestLeftovers -v ./test/e2e/
+func TestLeftovers(t *testing.T) {
+	tokenFile := os.Getenv("KEVASO_LINODE_TOKEN_FILE")
+	if tokenFile == "" {
+		t.Skip("KEVASO_LINODE_TOKEN_FILE not set")
+	}
+	b := newBed(t, tokenFile, "kvt-list-")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	left, reserved, err := b.Leftovers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("instances, volumes, NodeBalancers, domains, firewalls, VPCs labelled kvt-/kevaso-e2e-: %d %v", len(left), left)
+	t.Logf("reserved IPv4 addresses in the account: %d", reserved)
+	if len(left) > 0 {
+		t.Errorf("left in the account: %v", left)
+	}
 }
