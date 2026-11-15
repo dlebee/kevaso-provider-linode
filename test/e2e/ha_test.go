@@ -1,15 +1,13 @@
 //go:build e2e
 
-// TestHA is M16's "done when" on real Linodes: system nodes joined with kvoadm, one of them lost
-// and back, two plus a light node, a clean removal, a rolling upgrade, and a cluster moved from
-// SQLite to etcd. Linodes have no KVM, so the silos are containers (docker).
+// TestHA is the part of M16's "done when" that TestHA3 (three system nodes, the rules of
+// 2026-11-14) doesn't cover, on real Linodes: a cluster started on SQLite and moved to etcd with
+// kvoadm store migrate (step 7), then two system nodes and a light, state-only one, and losing a
+// full one (step 4). Linodes have no KVM, so the silos are containers (docker).
 //
-//	KEVASO_LINODE_TOKEN_FILE=~/linode-token.txt go test -tags e2e -v -run TestHA -timeout 180m ./test/e2e/
+//	KEVASO_LINODE_TOKEN_FILE=~/linode-token.txt go test -tags e2e -v -run 'TestHA$' -timeout 90m ./test/e2e/
 //
-// Two parts, one after the other so that at most four Linodes exist at once (KEVASO_E2E_HA_PART=
-// three or light runs one): "three" (three system nodes and a worker: steps 1, 2, 3, 6, 5) and
-// "light" (a cluster started on SQLite and migrated, then two system nodes and a light one: steps
-// 7 and 4). Everything is labelled and tagged kvt-ha-RUN and swept at the end.
+// Four Linodes. Everything is labelled and tagged kvt-ha-RUN and swept at the end.
 package e2e
 
 import (
@@ -21,7 +19,6 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -31,25 +28,13 @@ func TestHA(t *testing.T) {
 	if tokenFile == "" {
 		t.Skip("KEVASO_LINODE_TOKEN_FILE not set: this test creates real Linodes")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 85*time.Minute)
 	defer cancel()
 	b := newBed(t, tokenFile, "kvt-ha-")
 	t.Logf("run %s, region %s", b.Tag, b.Region)
 	b.CleanupAtEnd(t)
 	k := newKit(t, ctx)
-	// Two builds of the same code, told apart by their version only (step 6 rolls one to the other).
-	from := k.Build("kevasod-v0.16.0", "kevaso.com/core/cmd/kevasod", "linux", "v0.16.0")
-	to := k.Build("kevasod-v0.16.1", "kevaso.com/core/cmd/kevasod", "linux", "v0.16.1")
-	part := os.Getenv("KEVASO_E2E_HA_PART")
-	if part == "" || part == "three" {
-		haThree(t, ctx, b, k, from, to)
-	}
-	if t.Failed() {
-		return
-	}
-	if part == "" || part == "light" {
-		haLight(t, ctx, b, k, from)
-	}
+	haLight(t, ctx, b, k, k.Build("kevasod-v0.16.0", "kevaso.com/core/cmd/kevasod", "linux", "v0.16.0"))
 }
 
 // ha is one part's cluster on its machines.
@@ -196,232 +181,6 @@ func (h *ha) exec(url, name string, cmd ...string) (string, error) {
 func (h *ha) unitState(ctx context.Context, m machine) string {
 	out, _ := h.b.SSH(ctx, m, "systemctl show kevasod -p ActiveEnterTimestampMonotonic -p NRestarts --value | tr '\\n' ' '")
 	return strings.TrimSpace(out)
-}
-
-// haThree: steps 1, 2, 3, 6 and 5 on three system nodes and a worker.
-func haThree(t *testing.T, ctx context.Context, b *bed, k *kit, from, to string) {
-	h := newHA(t, ctx, b, k, "ha", "cp1", "cp2", "cp3", "w1")
-	c, ms, ssh := h.c, h.ms, b.SSHFlags()
-	cps := []string{"cp1", "cp2", "cp3"}
-
-	// 1. One system node on etcd, a worker with docker, a container silo.
-	t.Log(c.MustKvoadm(append([]string{"init", "root@" + ms["cp1"].Public, "--external-ip", ms["cp1"].Public, "--kevasod", from, "--name", "cp1", "--cluster", "ha",
-		"--store", "etcd", "--api-server", "https://" + ms["cp1"].Public + ":6443"}, ssh...)...))
-	if cp := h.hosts()["cp1"].Status.ControlPlane; cp == nil || cp.Store != "etcd" || cp.PeerURL == "" {
-		t.Fatalf("cp1's store: %+v", cp)
-	}
-	t.Log(c.MustKvoadm(append([]string{"host", "add", "root@" + ms["w1"].Public, "--external-ip", ms["w1"].Public, "--kevasod", from, "--name", "w1",
-		"--install", "worker", "--runtime", "docker", "--region", b.Region}, ssh...)...))
-	c.MustKvo("apiVersion: kevaso/v1\nkind: Namespace\nmetadata: { name: ha }\n---\n"+h.silo("a"), "apply", "-f", "-")
-	if on := h.running("a", 8*time.Minute); on != "w1" {
-		t.Fatalf("a on %s", on)
-	}
-	aBefore := h.one(ctx, ms["w1"], "a")
-	t.Logf("step 1: cp1 on etcd, w1 with docker, silo a running (%s)", aBefore)
-
-	// 2. Two more system nodes join: all three vote, each serves the API, kvo lists all three.
-	for _, n := range []string{"cp2", "cp3"} {
-		t.Log(c.MustKvoadm(append([]string{"host", "add", "root@" + ms[n].Public, "--external-ip", ms[n].Public, "--kevasod", from, "--name", n, "--install", "control-plane"}, ssh...)...))
-	}
-	var urls []string
-	eventually(t, "three voters serving the API", 3*time.Minute, func() (bool, string) {
-		hs, err := c.Hosts()
-		if err != nil {
-			return false, err.Error()
-		}
-		urls = nil
-		var s []string
-		for _, n := range cps {
-			s = append(s, fmt.Sprintf("%s=%s/%s", n, hs[n].Member(), hs[n].APIURL()))
-			if hs[n].Member() == "voter" && hs[n].APIURL() != "" && hs[n].Ready() {
-				urls = append(urls, hs[n].APIURL())
-			}
-		}
-		return len(urls) == 3, strings.Join(s, " ")
-	})
-	for _, u := range urls {
-		if !strings.Contains(c.Servers(), u) {
-			t.Fatalf("kvo context lists %q, not %s", c.Servers(), u)
-		}
-	}
-	for _, u := range urls {
-		if out, err := c.KvoAt(u, "get", "silo", "a", "-n", "ha"); err != nil || !strings.Contains(out, "Running") {
-			t.Fatalf("API at %s: %v %s", u, err, out)
-		}
-		eventually(t, "exec through "+u, 2*time.Minute, func() (bool, string) { // the agent holds a tunnel to each
-			out, err := h.exec(u, "a", "echo", "hello-from-a")
-			return err == nil && strings.Contains(out, "hello-from-a"), fmt.Sprint(err, out)
-		})
-	}
-	t.Logf("step 2: cp1, cp2, cp3 vote; each serves the API and execs; kvo lists %s", c.Servers())
-
-	// 3. Lose one: the leader, powered off with nothing stopped first.
-	var lead string
-	eventually(t, "one leader", 2*time.Minute, func() (bool, string) {
-		l := leaders(h.hosts(), cps...)
-		if len(l) == 1 {
-			lead = l[0]
-		}
-		return len(l) == 1, fmt.Sprint(l)
-	})
-	var rest []string
-	for _, n := range cps {
-		if n != lead {
-			rest = append(rest, n)
-		}
-	}
-	b.PowerOff(ctx, ms[lead])
-	lost := time.Now()
-	t.Logf("step 3: %s (the leader) powered off", lead)
-	took := time.Now()
-	if out, err := c.Kvo("", "get", "hosts"); err != nil {
-		t.Fatalf("the API with %s off: %v %s", lead, err, out)
-	}
-	// kvo starts at the first server it lists every time: with that one off, failing over must
-	// not wait for the OS's connect timeout.
-	if d := time.Since(took); d > 20*time.Second {
-		t.Fatalf("kvo get hosts with %s off took %v", lead, d.Round(time.Second))
-	}
-	var newLead string
-	eventually(t, "a new leader", 3*time.Minute, func() (bool, string) {
-		hs, err := c.Hosts()
-		if err != nil {
-			return false, err.Error()
-		}
-		l := leaders(hs, rest...)
-		if len(l) > 1 {
-			t.Fatalf("two leaders at once: %v", l)
-		}
-		if len(l) == 1 {
-			newLead = l[0]
-		}
-		return len(l) == 1, fmt.Sprint(l)
-	})
-	t.Logf("step 3: %s leads after %s", newLead, time.Since(lost).Round(time.Second))
-	c.MustKvo(h.silo("b"), "apply", "-f", "-")
-	if on := h.running("b", 5*time.Minute); on != "w1" {
-		t.Fatalf("b on %s", on)
-	}
-	if out, err := h.exec("", "a", "echo", "still-here"); err != nil || !strings.Contains(out, "still-here") {
-		t.Fatalf("exec into a with %s off: %v %s", lead, err, out)
-	}
-	if got := h.one(ctx, ms["w1"], "a"); got != aBefore {
-		t.Fatalf("a's container changed while %s was off: %s, was %s", lead, got, aBefore)
-	}
-	bOnce := h.one(ctx, ms["w1"], "b")
-	t.Logf("step 3: API, scheduling (b on w1) and exec work without %s; a untouched, b started once", lead)
-
-	// A removal that would lose the majority (one of two healthy of three) is refused.
-	eventually(t, lead+" seen as down", 2*time.Minute, func() (bool, string) {
-		hb := h.hosts()[lead].Status.LastHeartbeat
-		return hb != nil && time.Since(*hb) > 50*time.Second, fmt.Sprint(hb)
-	})
-	out, err := c.Kvoadm("host", "remove", rest[0])
-	if err == nil || !strings.Contains(out, "majority") {
-		t.Fatalf("removing %s with %s off: want a refusal about the majority, got %v\n%s", rest[0], lead, err, out)
-	}
-	if hs := h.hosts(); hs[rest[0]].Status.ControlPlane == nil || hs[rest[0]].Member() != "voter" {
-		t.Fatalf("refused removal changed %s: %+v", rest[0], hs[rest[0]].Status.ControlPlane)
-	}
-	t.Logf("step 5 (refusal): host remove %s refused with %s down: %s", rest[0], lead, firstLine(out))
-
-	// Back on: it rejoins and catches up (it holds b, written while it was off).
-	b.PowerOn(ctx, ms[lead])
-	leadURL := "https://" + ms[lead].Public + ":6443"
-	eventually(t, lead+" back as a voter", 5*time.Minute, func() (bool, string) {
-		hl := h.hosts()[lead]
-		return hl.Ready() && hl.Member() == "voter", fmt.Sprintf("ready=%v member=%s", hl.Ready(), hl.Member())
-	})
-	eventually(t, lead+" serving what was written while it was off", 2*time.Minute, func() (bool, string) {
-		out, err := c.KvoAt(leadURL, "get", "silo", "b", "-n", "ha")
-		return err == nil && strings.Contains(out, "Running"), fmt.Sprint(err, out)
-	})
-	if got := h.one(ctx, ms["w1"], "b"); got != bOnce {
-		t.Fatalf("b restarted after %s came back: %s, was %s", lead, got, bOnce)
-	}
-	if l := leaders(h.hosts(), cps...); len(l) != 1 {
-		t.Fatalf("leaders after %s came back: %v", lead, l)
-	}
-	t.Logf("step 3: %s back, a voter again, caught up; still one leader", lead)
-
-	// 6. Upgrade: system nodes one at a time while the API is polled, then the worker, whose
-	// container never stops.
-	aBefore = h.one(ctx, ms["w1"], "a")
-	var mu sync.Mutex
-	okN, fails := 0, []string{}
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-time.After(500 * time.Millisecond):
-			}
-			out, err := c.Kvo("", "get", "hosts")
-			mu.Lock()
-			if err == nil {
-				okN++
-			} else {
-				fails = append(fails, time.Now().Format(time.TimeOnly)+" "+firstLine(out))
-			}
-			mu.Unlock()
-		}
-	}()
-	upOut, upErr := c.Kvoadm("upgrade", "--kevasod", to, "--ssh-key", b.Key)
-	close(stop)
-	wg.Wait()
-	t.Log(upOut)
-	if upErr != nil {
-		t.Fatalf("kvoadm upgrade: %v", upErr)
-	}
-	t.Logf("step 6: API polled %d times during the roll, %d failures", okN+len(fails), len(fails))
-	if len(fails) > 0 {
-		t.Errorf("the API failed during the upgrade: %s", strings.Join(fails, "; "))
-	}
-	hs := h.hosts()
-	for _, n := range append(cps, "w1") {
-		if hs[n].Status.Version != "v0.16.1" || !hs[n].Ready() {
-			t.Fatalf("%s after the upgrade: version %s ready %v", n, hs[n].Status.Version, hs[n].Ready())
-		}
-	}
-	if got := h.one(ctx, ms["w1"], "a"); got != aBefore {
-		t.Fatalf("a's container restarted in the upgrade: %s, was %s", got, aBefore)
-	}
-	t.Logf("step 6: every host at v0.16.1; a kept its container (%s)", aBefore)
-
-	// 5. Remove a system node cleanly: its member goes first, then the Host.
-	victim := ""
-	for _, n := range cps {
-		if !hs[n].Leader() {
-			victim = n
-		}
-	}
-	out = c.MustKvoadm("host", "remove", victim)
-	t.Log(out)
-	i, j := strings.Index(out, "left the store"), strings.Index(out, "removed from the cluster")
-	if i < 0 || j < i {
-		t.Fatalf("host remove %s: want the member removed before the host:\n%s", victim, out)
-	}
-	hs = h.hosts()
-	if _, ok := hs[victim]; ok {
-		t.Fatalf("%s still a Host", victim)
-	}
-	voters := 0
-	for _, n := range cps {
-		if hs[n].Member() == "voter" {
-			voters++
-		}
-	}
-	if voters != 2 {
-		t.Fatalf("voters after removing %s: %d", victim, voters)
-	}
-	c.MustKvo(h.silo("c"), "apply", "-f", "-")
-	h.running("c", 5*time.Minute)
-	t.Logf("step 5: %s removed (member first, then the Host); two voters left and the cluster still schedules", victim)
-	h.done(ctx)
 }
 
 // objects is every object of the kinds the migration must keep: "KIND NS/NAME UID".
