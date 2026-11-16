@@ -277,12 +277,14 @@ func (w *watcher) stop(t *testing.T, from, to string) time.Duration {
 
 func (c *fleet) moves(t *testing.T) {
 	c.fresh(t, "silo", "roam", "keep", "ha")
-	// A docker silo with nothing local moves anywhere: the old host stops it first.
+	// A docker silo with nothing local moves anywhere, as a fresh copy: a plain move is refused
+	// (its own files are never kept) unless onHostLoss is Recreate and the move says --recreate.
 	c.apply(t, `apiVersion: kevaso/v1
 kind: Silo
 metadata: { name: roam }
 spec:
   runtime: docker
+  availability: { onHostLoss: Recreate }
   container:
     image: `+pyImage+`
     command: [python3, -c, "import time\nwhile True: time.sleep(3600)"]
@@ -310,10 +312,13 @@ spec:
     - { name: data, class: linode-block, size: 10Gi, mountPath: /data }
 `, name, pyImage, policy)
 	}
-	// §0.7: only a silo that asks to stop without the control plane (onControlPlaneLoss: Stop) is
-	// started elsewhere when its host is lost; keep (no opt-in) waits for its host.
-	c.apply(t, vol("keep", "onHostLoss: Wait"))
-	c.apply(t, vol("ha", "onHostLoss: Move, onControlPlaneLoss: Stop, after: 30s"))
+	// A container moves only as a fresh copy (onHostLoss: Recreate, kvo move --recreate). The
+	// linode-block volume still follows, so the file on it is kept. keep has no Stop opt-in, so a
+	// lost host never starts it elsewhere. ha asks to stop without the control plane; it is
+	// started elsewhere only after its host reports FenceStopped, which a powered-off machine
+	// cannot do.
+	c.apply(t, vol("keep", "onHostLoss: Recreate"))
+	c.apply(t, vol("ha", "onHostLoss: Recreate, onControlPlaneLoss: Stop, after: 30s"))
 	proof := map[string]string{}
 	for _, name := range []string{"keep", "ha"} {
 		s := c.running(t, name, 10*time.Minute)
@@ -336,9 +341,10 @@ spec:
 	hasProof("keep")
 	t.Log("keep moved with its linode-block volume; its file is there")
 
-	// keep and ha on one host, H; H powered off through the Linode API: ha (onHostLoss: Move) comes
-	// up on the other worker with its file once fenced; keep (Wait) moves only by hand, and only
-	// with --confirm-fenced.
+	// keep and ha on one host, H; H powered off through the Linode API. The machine cannot report
+	// FenceStopped, so ha is not started elsewhere by itself, and keep (no Stop opt-in) stays.
+	// A person moves each once the machine is off (--confirm-fenced --recreate); the volume's
+	// file comes along.
 	keep, _ = c.silo("keep")
 	ha, _ := c.silo("ha")
 	h := keep.Status.Host
@@ -347,8 +353,6 @@ spec:
 		hasProof("ha")
 	}
 	o := other(h)
-	w := c.watch(t, "ha")
-	time.Sleep(3 * time.Second)
 	if err := c.b.API.ShutdownInstance(c.ctx, c.host(h).ID); err != nil {
 		t.Fatal(err)
 	}
@@ -363,36 +367,48 @@ spec:
 		})
 		t.Logf("%s is back", h)
 	})
-	down := time.Now()
 	t.Logf("%s (Linode %d) powered off", h, c.host(h).ID)
-	// Core says a silent host on the silo (HostUnreachable, since when, and what the control plane
-	// waits for) before it starts the opted-in silo elsewhere.
-	unreachable := ""
-	c.eventually(t, "ha running on "+o+" after losing "+h, 8*time.Minute, func() (bool, string) {
+	var unreachable, why string
+	c.eventually(t, "ha stays on lost "+h+" (no FenceStopped)", 3*time.Minute, func() (bool, string) {
 		s, err := c.silo("ha")
-		if st, r := s.cond("HostUnreachable"); st == "True" && unreachable == "" {
+		st, r := s.cond("HostUnreachable")
+		if st == "True" && unreachable == "" {
 			unreachable = r
 		}
+		for _, cnd := range s.Status.Conditions {
+			if cnd.Type == "HostUnreachable" {
+				why = cnd.Message
+			}
+		}
+		return err == nil && st == "True" && s.Status.Host == h && s.Status.Phase != "Running" && strings.Contains(why, "started elsewhere"),
+			fmt.Sprintf("%+v %s", s.Status, why)
+	})
+	if unreachable == "" {
+		t.Error("ha never said HostUnreachable while its host was powered off")
+	} else {
+		t.Logf("ha said HostUnreachable (%s) and was not started elsewhere: %s", unreachable, why)
+	}
+	if out, err := c.kvoe("move", "silo", "ha", "--to", o, "--recreate"); err == nil || !strings.Contains(out, "--confirm-fenced") {
+		t.Fatalf("ha off the lost host without --confirm-fenced: %v %s", err, out)
+	}
+	out := c.mustKvo(t, "move", "silo", "ha", "--to", o, "--confirm-fenced", "--recreate")
+	t.Logf("kvo move ha --confirm-fenced --recreate: %s", strings.TrimSpace(out))
+	c.eventually(t, "ha running on "+o, 8*time.Minute, func() (bool, string) {
+		s, err := c.silo("ha")
 		return err == nil && s.Status.Host == o && s.Status.Phase == "Running", fmt.Sprintf("%+v %v", s.Status, err)
 	})
-	gap := w.stop(t, h, o)
-	if unreachable == "" {
-		t.Error("ha never said HostUnreachable before it was started elsewhere")
-	} else {
-		t.Logf("ha said HostUnreachable (%s) before it was started elsewhere", unreachable)
-	}
 	hasProof("ha")
-	t.Logf("ha came up on %s with its file %s after %s was powered off (%s between copies), after fencing", o, time.Since(down).Round(time.Second), h, gap.Round(time.Millisecond))
+	t.Logf("ha stayed on powered-off %s until --confirm-fenced --recreate, then came up on %s with its file", h, o)
 
 	keep, _ = c.silo("keep")
 	if keep.Status.Host != h || keep.Status.Phase != "Unknown" {
-		t.Fatalf("keep (onHostLoss: Wait) should stay on lost %s: %+v", h, keep.Status)
+		t.Fatalf("keep (onHostLoss: Recreate, no Stop) should stay on lost %s: %+v", h, keep.Status)
 	}
-	if out, err := c.kvoe("move", "silo", "keep", "--to", o); err == nil || !strings.Contains(out, "--confirm-fenced") {
+	if out, err := c.kvoe("move", "silo", "keep", "--to", o, "--recreate"); err == nil || !strings.Contains(out, "--confirm-fenced") {
 		t.Fatalf("a move off the lost host without --confirm-fenced: %v %s", err, out)
 	}
-	out := c.mustKvo(t, "move", "silo", "keep", "--to", o, "--confirm-fenced")
-	t.Logf("kvo move --confirm-fenced: %s", strings.TrimSpace(out))
+	out = c.mustKvo(t, "move", "silo", "keep", "--to", o, "--confirm-fenced", "--recreate")
+	t.Logf("kvo move --confirm-fenced --recreate: %s", strings.TrimSpace(out))
 	c.eventually(t, "keep running on "+o, 8*time.Minute, func() (bool, string) {
 		s, err := c.silo("keep")
 		return err == nil && s.Status.Host == o && s.Status.Phase == "Running", fmt.Sprintf("%+v %v", s.Status, err)
@@ -420,7 +436,7 @@ func (c *fleet) moveBy(t *testing.T, name, from, to string) {
 	w := c.watch(t, name)
 	time.Sleep(2 * time.Second) // a few samples of before
 	start := time.Now()
-	out := c.mustKvo(t, "move", "silo", name, "--to", to)
+	out := c.mustKvo(t, "move", "silo", name, "--to", to, "--recreate")
 	if !strings.Contains(out, "moving to "+to) {
 		t.Fatalf("kvo move: %s", out)
 	}

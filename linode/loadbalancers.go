@@ -2,6 +2,8 @@ package linode
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -21,6 +23,30 @@ func NodeBalancerLabel(id string) string {
 		l = l[:32]
 	}
 	return l
+}
+
+// nodeLabel is a NodeBalancer backend's label. Linode requires 3–32 characters (a real API 400:
+// [nodes[0].label] Length must be 3-32 characters). A host name can be shorter (w1) or longer.
+// A short name is prefixed; a long one keeps a hash of the whole name so two don't share a label.
+func nodeLabel(name string) string {
+	const minL, maxL = 3, 32
+	if len(name) >= minL && len(name) <= maxL {
+		return name
+	}
+	if len(name) < minL {
+		l := "kvo-" + name
+		if len(l) < minL {
+			return "kvo-node"
+		}
+		return l
+	}
+	sum := sha256.Sum256([]byte(name))
+	suf := hex.EncodeToString(sum[:4]) // 8 hex characters
+	head := name
+	if room := maxL - 1 - len(suf); len(head) > room {
+		head = head[:room]
+	}
+	return strings.TrimRight(head, "-") + "-" + suf
 }
 
 // EnsureLoadBalancer implements kplugin.LoadBalancers.
@@ -175,7 +201,7 @@ func (p *Provider) ensureNodeBalancer(ctx context.Context, lb kplugin.LoadBalanc
 			Algorithm: algo, Check: linodego.CheckConnection, CheckInterval: 5, CheckTimeout: 3, CheckAttempts: 2}
 		for _, b := range backends {
 			opts.Nodes = append(opts.Nodes, linodego.NodeBalancerConfigRebuildNodeOptions{NodeBalancerNodeCreateOptions: linodego.NodeBalancerNodeCreateOptions{
-				Label: b.Name, Weight: 100, Mode: linodego.ModeAccept, Address: b.PrivateAddress + ":" + strconv.Itoa(port.NodePort)}})
+				Label: nodeLabel(b.Name), Weight: 100, Mode: linodego.ModeAccept, Address: b.PrivateAddress + ":" + strconv.Itoa(port.NodePort)}})
 		}
 		c, ok := byPort[port.Port]
 		if !ok {

@@ -3,8 +3,9 @@
 // TestHA3 is what one bare-metal system node can't show, on real Linodes: three system nodes (etcd)
 // and two docker workers, under the rules of 2026-11-14 (design notebook §0.7, §0.8): a worker that
 // loses the control plane keeps its last desired state and stops nothing but the silos that asked
-// (onControlPlaneLoss: Stop, after their after); only those, with onHostLoss: Recreate, are started
-// elsewhere, and never twice; starting a cluster is explicit (kvoadm init); a worker holds when a
+// (onControlPlaneLoss: Stop, after their after); an opted-in Stop silo is started elsewhere only
+// after its host reports FenceStopped, otherwise a person runs kvo move --confirm-fenced, and
+// never twice; starting a cluster is explicit (kvoadm init); a worker holds when a
 // control plane is older than what it last saw, but a deliberate restore is a new history.
 //
 // One cluster of five nanodes, made once; each part is a subtest that can run alone, and leaves
@@ -863,8 +864,11 @@ func (h *ha3) talkedTo(t *testing.T) string {
 // ── b: a worker cut off from every system node ──────────────────────────────────────────────
 
 // ha3Cut (b): w1 cut off from the three system nodes. A silo without the opt-in keeps running
-// there and is not started elsewhere; a Stop + Recreate silo stops after its after, is started on
-// w2, and at no moment do both run it. The cut is lifted the moment the restart is committed.
+// there and is not started elsewhere. A Stop + Recreate silo stops on w1 after its after (its
+// fence is local). The control plane does not start it elsewhere: w1 cannot report FenceStopped
+// while it is cut off, and silence alone never starts another copy. A person runs
+// kvo move --confirm-fenced --recreate. The cut is lifted the moment that move is committed.
+// At no moment do both workers run it.
 func ha3Cut(t *testing.T, h *ha3) {
 	const ns = "ha-b"
 	const after = 30 * time.Second
@@ -873,7 +877,9 @@ func ha3Cut(t *testing.T, h *ha3) {
 		siloYAML(ns, "once", "", "availability: { onControlPlaneLoss: Stop, after: 30s, onHostLoss: Recreate }"))
 	ss := h.waitRunning(t, ns, 10*time.Minute, "keep", "once")
 	if ss["once"].Status.Host != "w1" {
-		h.c.MustKvo("", "move", "silo", "once", "-n", ns, "--to", "w1")
+		// A docker container's own files are never kept, so a move with its data is refused.
+		// onHostLoss is Recreate: the fresh copy is --recreate.
+		h.c.MustKvo("", "move", "silo", "once", "-n", ns, "--to", "w1", "--recreate")
 		eventually(t, "once on w1", 5*time.Minute, func() (bool, string) {
 			s, _ := h.silo(ns, "once")
 			return s.Status.Host == "w1" && s.Status.Phase == "Running" && s.Status.MovingFrom == "", s.Status.Host + " " + s.Status.Phase
@@ -925,18 +931,30 @@ func ha3Cut(t *testing.T, h *ha3) {
 	h.cut(t, "w1", cps...)
 	cutAt := time.Now()
 	t.Log("b: w1 cut off from cp1, cp2, cp3 (public and private addresses; SSH from here untouched)")
-	var committed time.Time
-	for deadline := time.Now().Add(6 * time.Minute); ; time.Sleep(200 * time.Millisecond) {
+	// Past the host lease and the silo's after: w1 is lost, its fence has had time to stop the
+	// copy, and the control plane has not started another (Rule 1).
+	hold := after + stopMargin(after) + coreHostLease
+	for deadline := time.Now().Add(hold); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
 		s, err := h.silo(ns, "once")
 		if err == nil && s.Status.Host != "" && s.Status.Host != "w1" {
 			h.uncut("w1")
+			t.Fatalf("b: the control plane restarted once on %q by itself %s into the cut", s.Status.Host, time.Since(cutAt).Round(time.Second))
+		}
+	}
+	t.Logf("b: still on w1 %s into the cut: not restarted elsewhere by itself", time.Since(cutAt).Round(time.Second))
+	h.c.MustKvo("", "move", "silo", "once", "-n", ns, "--to", "w2", "--confirm-fenced", "--recreate")
+	var committed time.Time
+	for deadline := time.Now().Add(2 * time.Minute); ; time.Sleep(200 * time.Millisecond) {
+		s, err := h.silo(ns, "once")
+		if err == nil && s.Status.Host == "w2" {
+			h.uncut("w1")
 			committed = time.Now()
-			t.Logf("b: the restart on %q committed %s into the cut: the cut lifted at once", s.Status.Host, committed.Sub(cutAt).Round(time.Second))
+			t.Logf("b: confirm-fenced move committed on w2 %s into the cut: the cut lifted at once", committed.Sub(cutAt).Round(time.Second))
 			break
 		}
 		if time.Now().After(deadline) {
 			h.uncut("w1")
-			t.Fatal("b: the control plane never restarted once elsewhere")
+			t.Fatalf("b: confirm-fenced move did not place once on w2: %v host %q phase %q", err, s.Status.Host, s.Status.Phase)
 		}
 	}
 	h.waitRunning(t, ns, 5*time.Minute, "once")

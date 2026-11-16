@@ -226,6 +226,18 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					reply(map[string]any{})
 					return
 				}
+				// Linode: a backend node's label is 3–32 characters (real API 400).
+				if nodes, ok := body["nodes"].([]any); ok {
+					for ni, n := range nodes {
+						label, _ := n.(map[string]any)["label"].(string)
+						if len(label) < 3 || len(label) > 32 {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(400)
+							reply(map[string]any{"errors": []map[string]any{{"field": fmt.Sprintf("nodes[%d].label", ni), "reason": "Length must be 3-32 characters"}}})
+							return
+						}
+					}
+				}
 				c["nodes"] = body["nodes"]
 				c["port"] = body["port"]
 				c["algorithm"], c["proxy_protocol"] = body["algorithm"], body["proxy_protocol"]

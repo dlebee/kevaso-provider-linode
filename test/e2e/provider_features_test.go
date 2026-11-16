@@ -209,6 +209,7 @@ kind: Silo
 metadata: { name: db, namespace: ` + ns + ` }
 spec:
   runtime: docker
+  availability: { onHostLoss: Recreate } # a container moves only as a fresh copy (--recreate)
   container: { image: docker.io/library/nginx:1.27-alpine }
   resources: { memory: 64Mi }
   volumes:
@@ -273,10 +274,11 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 	t.Logf("db on %s: two Linode volumes, %v, handles %v", s.Status.Host, keys(vols), handles)
 	h.c.MustKvo("", "exec", "silo", "db", "-n", ns, "--", "sh", "-c", "echo d > /data/m && echo w > /wal/m && sync")
 
-	// Moved with the silo: the same Linode volumes, attached to the other host, data kept.
+	// Moved with the silo: a fresh container (--recreate), the same Linode volumes on the other
+	// host, data kept. A plain move is refused: a docker container's own files are never kept.
 	other := map[string]string{"w1": "w2", "w2": "w1"}[s.Status.Host]
 	start := time.Now()
-	h.c.MustKvo("", "move", "silo", "db", "-n", ns, "--to", other)
+	h.c.MustKvo("", "move", "silo", "db", "-n", ns, "--to", other, "--recreate")
 	eventually(t, "db running on "+other+" with its volumes", 10*time.Minute, func() (bool, string) {
 		s, _ = h.volSilo(ns, "db")
 		ok := s.Status.Phase == "Running" && s.Status.Host == other && len(s.Status.Volumes) == 2

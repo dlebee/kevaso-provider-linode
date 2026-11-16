@@ -93,6 +93,49 @@ func count(l []string, s string) int {
 	return n
 }
 
+// Linode rejects a NodeBalancer backend label outside 3–32 characters. Host names in the e2e
+// are shorter (w1): the real API answered 400 [nodes[0].label] Length must be 3-32 characters,
+// so the NodeBalancer's address never appeared.
+func TestNodeBalancerNodeLabelFits(t *testing.T) {
+	f, p := newFakeAPI(t)
+	long := strings.Repeat("h", 40)
+	other := strings.Repeat("h", 39) + "z"
+	lb := kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: "0f8c6a9e-1111-2222-3333-444455556666", Namespace: "shop", Name: "web",
+		Ports: []kplugin.Port{{Name: "http", Protocol: "TCP", Port: 80, NodePort: 30000}},
+		Backends: []kplugin.HostInfo{
+			{Name: "w1", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"},
+			{Name: long, ID: "12", Region: "ca-central", PrivateAddress: "192.168.140.8"},
+			{Name: other, ID: "13", Region: "ca-central", PrivateAddress: "192.168.140.9"},
+		}}
+	if _, err := p.EnsureLoadBalancer(ctx, lb); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	var labels []string
+	for _, cs := range f.configs {
+		for _, c := range cs {
+			for _, n := range c["nodes"].([]any) {
+				labels = append(labels, n.(map[string]any)["label"].(string))
+			}
+		}
+	}
+	if len(labels) != 3 {
+		t.Fatalf("labels: %v", labels)
+	}
+	seen := map[string]bool{}
+	for _, l := range labels {
+		if len(l) < 3 || len(l) > 32 {
+			t.Errorf("label %q is %d characters, Linode wants 3–32", l, len(l))
+		}
+		if seen[l] {
+			t.Errorf("two backends share label %q", l)
+		}
+		seen[l] = true
+	}
+	if labels[0] == "w1" {
+		t.Errorf("host w1 was sent as the node label: Linode rejects it")
+	}
+}
+
 func TestNodeBalancer(t *testing.T) {
 	f, p := newFakeAPI(t)
 	tor := kplugin.HostInfo{Name: "tor", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"}
