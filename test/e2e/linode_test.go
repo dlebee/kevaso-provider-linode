@@ -303,8 +303,10 @@ spec:
 	}
 
 	// 6. A shared IP that follows its silo: the donor's IPv4 (an IP object adopting it, kept), announced
-	// over BGP by the silo's host; that host goes down, the silo is recreated on the other one, and the
-	// address answers there.
+	// over BGP by the silo's host. That host is shut down. edge opted in to stop without the control
+	// plane, so it is restarted elsewhere only after its own host reports FenceStopped for its latest
+	// start; a host that is shut down can't report, so nothing starts it on the other worker. A person
+	// runs kvo move silo edge -n e2e --to HOST --confirm-fenced --recreate, and the address answers there.
 	must(`apiVersion: kevaso/v1
 kind: IP
 metadata: { name: edge, namespace: e2e }
@@ -342,7 +344,28 @@ spec:
 	}
 	t.Logf("%s shut down", first)
 	start := time.Now()
-	eventually("edge recreated on the other worker", 6*time.Minute, func() (bool, string) {
+	// About a minute: the shut-down host cannot report FenceStopped, so edge is not started on the
+	// other worker by itself. A condition names kvo move --confirm-fenced when this test can read it.
+	otherHost := other(first)
+	var named string
+	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Second) {
+		edge = silo("edge")
+		if edge.Status.Host != "" && edge.Status.Host != first {
+			t.Fatalf("edge started on %s by itself after %s shut down: %+v", edge.Status.Host, first, edge.Status)
+		}
+		for _, c := range edge.Status.Conditions {
+			if strings.Contains(c.Message, "--confirm-fenced") {
+				named = c.Message
+			}
+		}
+	}
+	if named == "" {
+		t.Fatalf("edge's conditions never named --confirm-fenced while %s was shut down: %+v", first, edge.Status.Conditions)
+	}
+	t.Logf("edge was not started on %s by itself; a condition names the move: %s", otherHost, named)
+	moved := must("", kvo, "move", "silo", "edge", "-n", "e2e", "--to", otherHost, "--confirm-fenced", "--recreate")
+	t.Logf("kvo move edge --confirm-fenced --recreate: %s", strings.TrimSpace(moved))
+	eventually("edge running on the other worker", 6*time.Minute, func() (bool, string) {
 		edge = silo("edge")
 		return edge.Status.Host != "" && edge.Status.Host != first && edge.Status.Phase == "Running", fmt.Sprintf("%+v", edge.Status)
 	})
