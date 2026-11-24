@@ -26,7 +26,7 @@ import (
 //
 //	KEVASO_LINODE_TOKEN_FILE=… KEVASO_MAC_SSH_USER=me KEVASO_MAC_SSH_KEY=~/.ssh/kevaso-mac-test \
 //	KEVASO_MAC_KVOADM=… KEVASO_MAC_KVO=… KEVASO_MAC_KEVASOD_DARWIN=… KEVASO_MAC_KEVASOD_LINUX=… \
-//	go test -tags e2e -count=1 -v -timeout 40m -run TestMacWorker ./test/e2e/
+//	go test -tags e2e -count=1 -v -timeout 60m -run TestMacWorker ./test/e2e/
 func TestMacWorkerJoinsALinodeCluster(t *testing.T) {
 	need := func(k string) string {
 		v := os.Getenv(k)
@@ -39,7 +39,7 @@ func TestMacWorkerJoinsALinodeCluster(t *testing.T) {
 	kvoadm, kvo, kdarwin, klinux := need("KEVASO_MAC_KVOADM"), need("KEVASO_MAC_KVO"), need("KEVASO_MAC_KEVASOD_DARWIN"), need("KEVASO_MAC_KEVASOD_LINUX")
 	image := os.Getenv("KEVASO_MAC_IMAGE")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
 	b := newBed(t, tokenFile, "kvt-mac-")
 	b.CleanupAtEnd(t)
@@ -111,7 +111,113 @@ func TestMacWorkerJoinsALinodeCluster(t *testing.T) {
 	if o := c.MustKvo("", "exec", "-n", "mac", "silo", "ios", "--", "sw_vers", "-productName"); !strings.Contains(o, "macOS") {
 		t.Fatalf("exec in the macOS silo: %q", o)
 	}
+
+	// Two at a time (Apple's licence): a second silo runs, a third waits with the reason, and
+	// runs once one of the first two is deleted. Memory is not what stops it (3 x 8Gi fits).
+	silo := func(name string) string {
+		return "apiVersion: kevaso/v1\nkind: Silo\nmetadata: { name: " + name + ", namespace: mac }\nspec:\n  runtime: tart\n  container: { image: " + image + " }\n  resources: { cpu: 3, memory: 8Gi }\n"
+	}
+	c.MustKvo(silo("ios2"), "apply", "-f", "-")
+	eventually(t, "a second macOS silo Running", 12*time.Minute, func() (bool, string) {
+		o, _ := c.Kvo("", "get", "silo", "ios2", "-n", "mac", "-o", "json")
+		return strings.Contains(o, `"phase": "Running"`), o
+	})
+	c.MustKvo(silo("ios3"), "apply", "-f", "-")
+	time.Sleep(45 * time.Second)
+	if o, _ := c.Kvo("", "get", "silo", "ios3", "-n", "mac", "-o", "json"); strings.Contains(o, `"phase": "Running"`) || !strings.Contains(o, "Unschedulable") {
+		t.Fatalf("a third macOS silo on one Mac is not held back:\n%s", o)
+	} else {
+		t.Logf("third silo held: %s", macReason(o))
+	}
+
+	// Isolation (softnet, on by default): a silo reaches the internet, not the other silo, not
+	// the Mac's LAN router. Each "no" is checked against a "yes" from the Mac itself first.
+	ip2 := tartIP(t, "kv-mac-ios2-")
+	gw := macGateway(t)
+	execIn := func(cmd string) error {
+		_, err := c.Kvo("", "exec", "-n", "mac", "silo", "ios", "--", "sh", "-c", cmd)
+		return err
+	}
+	if err := execIn("curl -sI --max-time 15 https://example.com >/dev/null"); err != nil {
+		t.Errorf("silo ios can't reach the internet: %v", err)
+	}
+	if exec.Command("nc", "-z", "-G", "3", ip2, "22").Run() == nil {
+		if execIn("nc -z -G 3 "+ip2+" 22") == nil {
+			t.Errorf("silo ios reaches silo ios2 (%s:22): no isolation between silos", ip2)
+		}
+	} else {
+		t.Logf("the Mac itself can't reach %s:22: the silo-to-silo check proves nothing, skipped", ip2)
+	}
+	if exec.Command("ping", "-c", "2", "-t", "4", gw).Run() == nil {
+		if execIn("ping -c 2 -t 4 "+gw) == nil {
+			t.Errorf("silo ios reaches the Mac's LAN router %s", gw)
+		}
+	} else {
+		t.Logf("the Mac can't ping its router %s: the LAN check proves nothing, skipped", gw)
+	}
+
 	c.MustKvo("", "delete", "silo", "ios", "-n", "mac")
+	eventually(t, "the third silo Running once a slot is free", 12*time.Minute, func() (bool, string) {
+		o, _ := c.Kvo("", "get", "silo", "ios3", "-n", "mac", "-o", "json")
+		return strings.Contains(o, `"phase": "Running"`), o
+	})
+	c.MustKvo("", "delete", "silo", "ios2", "-n", "mac")
+	c.MustKvo("", "delete", "silo", "ios3", "-n", "mac")
+	eventually(t, "the silos' VMs gone from Tart", 5*time.Minute, func() (bool, string) {
+		o, _ := exec.Command("tart", "list").Output()
+		return !strings.Contains(string(o), "kv-mac-"), string(o)
+	})
+}
+
+// macReason is the Scheduled condition's message in a silo's JSON, for the log.
+func macReason(o string) string {
+	if i := strings.Index(o, "Unschedulable"); i >= 0 {
+		if j := strings.Index(o[i:], `"message": "`); j >= 0 {
+			rest := o[i+j+12:]
+			if k := strings.Index(rest, `"`); k >= 0 {
+				return rest[:k]
+			}
+		}
+	}
+	return "?"
+}
+
+// tartIP is the address of this Mac's Tart VM whose name starts with prefix (kevaso names a
+// silo's VM kv-NAMESPACE-NAME-…).
+func tartIP(t *testing.T, prefix string) string {
+	t.Helper()
+	o, err := exec.Command("tart", "list", "--format", "json").Output()
+	if err != nil {
+		t.Fatalf("tart list: %v", err)
+	}
+	var vms []struct{ Name string }
+	_ = json.Unmarshal(o, &vms)
+	for _, v := range vms {
+		if strings.HasPrefix(v.Name, prefix) {
+			ip, err := exec.Command("tart", "ip", v.Name).Output()
+			if err != nil {
+				t.Fatalf("tart ip %s: %v", v.Name, err)
+			}
+			return strings.TrimSpace(string(ip))
+		}
+	}
+	t.Fatalf("no Tart VM named %s…", prefix)
+	return ""
+}
+
+// macGateway is this Mac's default router.
+func macGateway(t *testing.T) string {
+	t.Helper()
+	o, err := exec.Command("route", "-n", "get", "default").Output()
+	if err == nil {
+		for _, l := range strings.Split(string(o), "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(l), ":"); ok && k == "gateway" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	t.Fatalf("no default gateway: %v", err)
+	return ""
 }
 
 // macLAN is this Mac's address on its own network (the Host's --internal-ip: it is behind NAT).
@@ -139,8 +245,18 @@ func macRemove(t *testing.T) {
 		_ = json.Unmarshal(o, &vms)
 		for _, v := range vms {
 			if strings.HasPrefix(v.Name, "kv-") {
-				_ = exec.Command("tart", "stop", v.Name).Run()
-				if o, err := exec.Command("tart", "delete", v.Name).CombinedOutput(); err != nil {
+				// kevasod may still be stopping it: stop, then delete, a few times.
+				var o []byte
+				var err error
+				for i := 0; i < 6; i++ {
+					_ = exec.Command("tart", "stop", v.Name).Run()
+					if o, err = exec.Command("tart", "delete", v.Name).CombinedOutput(); err == nil || strings.Contains(string(o), "does not exist") {
+						err = nil
+						break
+					}
+					time.Sleep(10 * time.Second)
+				}
+				if err != nil {
 					t.Errorf("deleting VM %s: %v\n%s", v.Name, err, o)
 				}
 			}
