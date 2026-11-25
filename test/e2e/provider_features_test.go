@@ -8,7 +8,7 @@
 //     address (README, "Addresses"); VLAN and VPC addresses aren't read (README);
 //   - block storage (linode-block): two volumes of one silo are two Linode volumes, each with its
 //     identity tag; attached to the silo's host; moved with the silo (kvo move), data kept, the
-//     same Linode volumes; one removed from the spec is deleted, the other kept; a label already
+//     same Linode volumes; one removed from the spec is detached and kept until the silo is deleted (core #14); a label already
 //     taken by a volume Kevaso didn't make is refused, never adopted (K-035); everything deleted with
 //     the silo, and only then; a volume name too long for a label refused by admission;
 //   - Kevaso's own rules, checked from this Mac: a port opened with hostPort: [external] answers;
@@ -341,7 +341,8 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 	})
 	t.Log("once the hand-made volume was gone, logs got a volume of its own")
 
-	// wal out of the spec: its Linode volume deleted, data's kept (K-035's scenario on real volumes).
+	// wal out of the spec: unmounted and detached, its Linode volume kept until the silo is deleted
+	// (core #14: a volume taken out of the spec is kept, never deleted on its own); data's untouched.
 	h.apply(t, dbYAML(ns, "data", "logs"))
 	walID := strings.Split(handles["wal"], ":")[0]
 	// A container's mounts can't change: core keeps wal mounted until the container is made again,
@@ -357,9 +358,9 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 		return false, firstLine(out) + fmt.Sprintf(" %+v", s.Status.Conditions)
 	})
 	t.Log(h.c.MustKvo("", "reset", "silo", "db", "-n", ns))
-	walGone, last := false, ""
-	for deadline := time.Now().Add(8 * time.Minute); time.Now().Before(deadline) && !walGone; time.Sleep(10 * time.Second) {
-		walGone, last = func() (bool, string) {
+	walKept, last := false, ""
+	for deadline := time.Now().Add(8 * time.Minute); time.Now().Before(deadline) && !walKept; time.Sleep(10 * time.Second) {
+		walKept, last = func() (bool, string) {
 			now := h.runVolumes(t)
 			var ids []string
 			for _, v := range now {
@@ -370,22 +371,22 @@ func pfVolumes(t *testing.T, h *ha3, labelPrefix string) {
 			if s.Status.Host != "" {
 				mounts, _ = h.sh(s.Status.Host, "findmnt -rn -o TARGET | grep '/wal$' || echo 'wal not mounted'")
 			}
-			inStatus := false
+			keptInStatus := false
 			for _, v := range s.Status.Volumes {
-				inStatus = inStatus || v.Name == "wal"
+				keptInStatus = keptInStatus || (v.Name == "wal" && !v.Mounted && strings.Contains(v.Message, "kept"))
 			}
-			return !strings.Contains(fmt.Sprint(ids), walID+" ") && strings.Contains(mounts, "wal not mounted") && !inStatus,
+			return strings.Contains(fmt.Sprint(ids), walID+" attached=false") && strings.Contains(mounts, "wal not mounted") && keptInStatus,
 				fmt.Sprintf("Linode %v; status.volumes %+v; on %s: %s", ids, s.Status.Volumes, s.Status.Host, strings.TrimSpace(mounts))
 		}()
 	}
-	if !walGone {
-		t.Errorf("wal dropped and db reset: not unmounted, let go and deleted in 8 minutes: %s", last)
+	if !walKept {
+		t.Errorf("wal dropped and db reset: not unmounted, detached and kept in 8 minutes: %s", last)
 	}
 	if got := h.c.MustKvo("", "exec", "silo", "db", "-n", ns, "--", "cat", "/data/m"); strings.TrimSpace(got) != "d" {
 		t.Errorf("data after wal's removal: %q", got)
 	}
-	if walGone {
-		t.Log("wal dropped, db reset: unmounted on the worker, gone from status, its Linode volume detached and deleted; data's kept with its data")
+	if walKept {
+		t.Log("wal dropped, db reset: unmounted on the worker, its Linode volume detached and kept (status says so); data's kept with its data")
 	}
 
 	// Deleted with the silo, and only then.
