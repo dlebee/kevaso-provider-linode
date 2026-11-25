@@ -9,8 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,8 +22,13 @@ import (
 // ── 4. Plugin operators ────────────────────────────────────────────────────────────────────────
 
 func (c *fleet) operator(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	pkg := filepath.Join(filepath.Dir(file), "..", "..", "..", "core", "examples", "operator-session")
+	// Core's example package, wherever the workspace has core (a sibling checkout or a worktree).
+	// Its root holds no Go files, so its command is listed and the package is two folders up.
+	dir, err := exec.CommandContext(c.ctx, "go", "list", "-f", "{{.Dir}}", "kevaso.com/core/examples/operator-session/cmd/kevaso-operator-session").Output()
+	if err != nil {
+		t.Fatalf("go list the operator-session example: %v", err)
+	}
+	pkg := filepath.Dir(filepath.Dir(strings.TrimSpace(string(dir))))
 	// On a reused cluster an earlier run may have left the plugin installed (or half: its
 	// controller never started); installing again takes over its own objects.
 	if out, _ := c.sh("", c.kvoadm, "plugin", "list"); strings.Contains(out, "sessions") {
