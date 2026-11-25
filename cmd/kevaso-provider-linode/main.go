@@ -33,6 +33,28 @@ type Config struct {
 	// Region is the worker's Linode region (node side), for the BGP route servers; DCID overrides it.
 	Region string `json:"region,omitempty"`
 	DCID   int    `json:"dcid,omitempty"`
+	// TokenSecret names the cluster secret's key holding the API token (default: the cluster secret
+	// linode, its key token: kvoadm plugin install --cluster-secret linode).
+	TokenSecret *SecretRef `json:"tokenSecret,omitempty"`
+}
+
+// SecretRef names one key of a cluster secret (Key default value).
+type SecretRef struct {
+	Name string `json:"name"`
+	Key  string `json:"key,omitempty"`
+}
+
+// credentialName is the systemd credential a key is loaded as: kevasod keeps the cluster secret as
+// a folder, and LoadCredential=NAME:FOLDER loads each key as NAME_KEY.
+func (c Config) credentialName() string {
+	r := SecretRef{Name: "linode", Key: "token"}
+	if c.TokenSecret != nil && c.TokenSecret.Name != "" {
+		r = *c.TokenSecret
+		if r.Key == "" {
+			r.Key = "value"
+		}
+	}
+	return r.Name + "_" + r.Key
 }
 
 func main() {
@@ -69,7 +91,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		fmt.Println(linode.Version)
 		return nil
 	case "serve":
-		token, err := credential("token")
+		token, err := credential(cfg.credentialName())
 		if err != nil {
 			return err
 		}
@@ -90,8 +112,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 	return fmt.Errorf("unknown command %q", cmd)
 }
 
-// credential reads a systemd credential (LoadCredential=NAME:…), or, outside systemd, the file
-// named by KEVASO_LINODE_TOKEN_FILE.
+// credential reads a systemd credential (NAME_KEY, from LoadCredential=NAME:FOLDER), or, outside
+// systemd, the file named by KEVASO_LINODE_TOKEN_FILE.
 func credential(name string) (string, error) {
 	var path string
 	if d := os.Getenv("CREDENTIALS_DIRECTORY"); d != "" {
@@ -99,7 +121,7 @@ func credential(name string) (string, error) {
 	} else if f := os.Getenv("KEVASO_LINODE_TOKEN_FILE"); f != "" {
 		path = f
 	} else {
-		return "", errors.New("no Linode token: run under systemd with LoadCredential=token:FILE (kvoadm plugin install --cluster-secret token)")
+		return "", errors.New("no Linode token: run under systemd (kvo create clustersecret linode --from-file token=FILE; kvoadm plugin install --cluster-secret linode)")
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
