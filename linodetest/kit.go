@@ -95,12 +95,33 @@ func (c *Cluster) MustKvo(stdin string, args ...string) string {
 func (c *Cluster) Kvoadm(args ...string) (string, error) {
 	for attempt := 1; ; attempt++ {
 		out, err := c.Run("", c.K.Kvoadm, args...)
+		if err == nil && len(args) > 0 && args[0] == "init" {
+			c.useAdminKvo()
+		}
 		if err == nil || attempt == 3 || !strings.Contains(out, "couldn't read the host key") || !strings.Contains(out, "connection reset by peer") {
 			return out, err
 		}
 		c.K.T.Logf("kvoadm %s: SSH reset while reading the host key, trying again (%d)", args[0], attempt)
 		time.Sleep(10 * time.Second)
 	}
+}
+
+// useAdminKvo points kvo at the admin context kvoadm init writes in the cluster's folder
+// (HOME/.kevaso/clusters/CLUSTER/kvo-admin.yaml). Since core's per-cluster kvoadm config, kvo's own
+// context is a plain user (editor: no hosts, no namespaces), and these tests do an admin's work.
+func (c *Cluster) useAdminKvo() {
+	m, _ := filepath.Glob(filepath.Join(c.Home, ".kevaso", "clusters", "*", "kvo-admin.yaml"))
+	if len(m) != 1 {
+		return // an older kvoadm (kvo is the admin already), or several clusters: leave it
+	}
+	c.Cfg = m[0]
+	env := make([]string, 0, len(c.Env))
+	for _, e := range c.Env {
+		if !strings.HasPrefix(e, "KVO_CONFIG=") {
+			env = append(env, e)
+		}
+	}
+	c.Env = append(env, "KVO_CONFIG="+c.Cfg)
 }
 
 func (c *Cluster) MustKvoadm(args ...string) string {
