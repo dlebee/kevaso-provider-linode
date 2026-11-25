@@ -73,7 +73,7 @@ func TestLinode(t *testing.T) {
 	kevasod := k.Build("kevasod", "kevaso.com/core/cmd/kevasod", "linux", "")
 	plugin := k.Build("kevaso-provider-linode", "kevaso.com/provider-linode/cmd/kevaso-provider-linode", "linux", "")
 	cl := k.Cluster()
-	env, sh, must := cl.Env, cl.Run, cl.Must
+	sh, must := cl.Run, cl.Must
 	ssh := b.SSHFlags()
 	eventually := func(what string, d time.Duration, f func() (bool, string)) {
 		t.Helper()
@@ -105,7 +105,7 @@ func TestLinode(t *testing.T) {
 		}
 		for _, args := range [][]string{{"get", "hosts", "-o", "yaml"}, {"get", "silos", "-A", "-o", "yaml"}} {
 			c := exec.CommandContext(dctx, kvo, args...)
-			c.Env = env
+			c.Env = cl.Env // the admin's, once kvoadm init ran
 			out, _ := c.CombinedOutput()
 			t.Logf("── kvo %s ──\n%s", strings.Join(args, " "), out)
 		}
@@ -211,6 +211,7 @@ metadata: { name: linode }
 spec:
   controller: { driver: nginx, silo: web, namespace: e2e }
   dns: { provider: linode, ttl: 30 }
+  hosts: [{ host: shop.` + zone + `, namespaces: [e2e] }]   # a host must be assigned to be claimed (core #12)
 ---
 apiVersion: kevaso/v1
 kind: Ingress

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"kevaso.com/provider-linode/linodetest"
 )
 
 // cluster is a control plane and two docker workers on Linodes, installed with kvoadm, with this
@@ -23,6 +25,7 @@ type fleet struct {
 	b                            *bed
 	ctx                          context.Context
 	kvo, kvoadm, kevasod, plugin string
+	home                         string // kvo's and kvoadm's HOME
 	env                          []string
 	ssh                          []string // kvoadm's SSH flags
 	cp, w1, w2                   machine
@@ -58,7 +61,9 @@ func newCluster(t *testing.T, ctx context.Context, b *bed) *fleet {
 	if b.State != "" {
 		home = filepath.Join(b.State, "home")
 	}
+	c.home = home
 	c.env = append(os.Environ(), "HOME="+home, "KVO_CONFIG="+filepath.Join(home, ".kevaso", "config.yaml"), "KVO_SERVER=", "KVO_TOKEN=")
+	_, c.env, _ = linodetest.AdminKvoEnv(home, c.env) // a kept cluster: its admin context, if any
 	if ms, ok := b.Restore(t); ok {
 		c.ssh = []string{"--ssh-key", b.Key, "--accept-host-key-on-first-use"}
 		c.cp, c.w1, c.w2 = ms["cp"], ms["w1"], ms["w2"]
@@ -121,6 +126,9 @@ func (c *fleet) install(t *testing.T) {
 	if !regexp.MustCompile(`KVR1-`).MatchString(out) {
 		t.Fatalf("no recovery key printed:\n%s", out)
 	}
+	// kvo's own context is a plain user since core's per-cluster kvoadm config: the admin's work
+	// here goes through the admin context init wrote.
+	_, c.env, _ = linodetest.AdminKvoEnv(c.home, c.env)
 	for name, m := range map[string]machine{"w1": c.w1, "w2": c.w2} {
 		t.Log(c.must(t, "", c.kvoadm, append([]string{"host", "add", "root@" + m.Public, "--external-ip", m.Public, "--kevasod", c.kevasod, "--name", name,
 			"--install", "worker", "--runtime", "docker", "--region", b.Region}, c.ssh...)...))
