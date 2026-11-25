@@ -136,10 +136,10 @@ func (c *fleet) install(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "linode.json")
 	_ = os.WriteFile(cfgFile, []byte(fmt.Sprintf(`{"tags": [%q], "labelPrefix": %q}`, b.Tag, b.Tag+"-")), 0o644)
 	tokenFile := os.Getenv("KEVASO_LINODE_TOKEN_FILE")
-	c.must(t, "", c.kvo, "create", "clustersecret", "token", "--from-file", tokenFile)
-	c.must(t, grantClusterSecrets("linode", "token"), c.kvo, "apply", "-f", "-")
+	c.must(t, "", c.kvo, "create", "clustersecret", "linode", "--from-file", "token="+tokenFile)
+	c.must(t, grantClusterSecrets("linode", "linode"), c.kvo, "apply", "-f", "-")
 	t.Log(c.must(t, "", c.kvoadm, append([]string{"plugin", "install", "root@" + c.cp.Public, "--name", "linode", "--binary", c.plugin, "--manifest", manifestFile(t),
-		"--cluster-secret", "token", "--config", cfgFile}, c.ssh...)...))
+		"--cluster-secret", "linode", "--config", cfgFile}, c.ssh...)...))
 	nodeCfg := filepath.Join(t.TempDir(), "node.json")
 	_ = os.WriteFile(nodeCfg, []byte(fmt.Sprintf(`{"region": %q}`, b.Region)), 0o644)
 	for _, w := range []machine{c.w1, c.w2} {
