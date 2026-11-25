@@ -1334,7 +1334,7 @@ func ha3Restore(t *testing.T, h *ha3) {
 	}
 	m := h.ms["cp1"]
 	start := time.Now()
-	out := h.mustKvoadm(string(key), append([]string{"init", "root@" + m.Public, "--restore", file, "--store", "etcd", "--kevasod", kevasod, "--name", "cp1", "--cluster", "ha3",
+	out := h.mustKvoadm(string(key), append([]string{"init", "root@" + m.Public, "--restore", file, "--no-hosts-added", "--store", "etcd", "--kevasod", kevasod, "--name", "cp1", "--cluster", "ha3",
 		"--external-ip", m.Public, "--api-server", h.url("cp1")}, h.ssh...)...)
 	t.Logf("f: kvoadm init --restore (%s):\n%s", time.Since(start).Round(time.Second), redact(out))
 	for _, w := range []string{"w1", "w2"} {
