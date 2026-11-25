@@ -67,6 +67,9 @@ func (c *Cluster) Run(stdin string, name string, args ...string) (string, error)
 	cmd := exec.CommandContext(c.K.Ctx, name, args...)
 	cmd.Env, cmd.Stdin = c.Env, strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
+	if err == nil && name == c.K.Kvoadm && len(args) > 0 && args[0] == "init" {
+		c.useAdminKvo() // however init was run (Kvoadm, Must, a restore with stdin)
+	}
 	return string(out), err
 }
 
@@ -90,18 +93,17 @@ func (c *Cluster) MustKvo(stdin string, args ...string) string {
 }
 
 // Kvoadm runs kvoadm. A fresh Linode sometimes resets the first SSH connections (seen on the
-// connection kvoadm opens only to read the host key, before it changes anything): those, and only
-// those, are tried again.
+// connection kvoadm opens only to read the host key, and in the handshake, before anything runs):
+// those, and only those, are tried again.
 func (c *Cluster) Kvoadm(args ...string) (string, error) {
 	for attempt := 1; ; attempt++ {
 		out, err := c.Run("", c.K.Kvoadm, args...)
-		if err == nil && len(args) > 0 && args[0] == "init" {
-			c.useAdminKvo()
-		}
-		if err == nil || attempt == 3 || !strings.Contains(out, "couldn't read the host key") || !strings.Contains(out, "connection reset by peer") {
+		// Reset before the SSH session exists (reading the host key, or the handshake): nothing ran.
+		early := strings.Contains(out, "couldn't read the host key") || strings.Contains(out, "ssh: handshake failed")
+		if err == nil || attempt == 3 || !early || !strings.Contains(out, "connection reset by peer") {
 			return out, err
 		}
-		c.K.T.Logf("kvoadm %s: SSH reset while reading the host key, trying again (%d)", args[0], attempt)
+		c.K.T.Logf("kvoadm %s: SSH reset before the session started, trying again (%d)", args[0], attempt)
 		time.Sleep(10 * time.Second)
 	}
 }
@@ -110,18 +112,26 @@ func (c *Cluster) Kvoadm(args ...string) (string, error) {
 // (HOME/.kevaso/clusters/CLUSTER/kvo-admin.yaml). Since core's per-cluster kvoadm config, kvo's own
 // context is a plain user (editor: no hosts, no namespaces), and these tests do an admin's work.
 func (c *Cluster) useAdminKvo() {
-	m, _ := filepath.Glob(filepath.Join(c.Home, ".kevaso", "clusters", "*", "kvo-admin.yaml"))
-	if len(m) != 1 {
-		return // an older kvoadm (kvo is the admin already), or several clusters: leave it
+	if cfg, env, ok := AdminKvoEnv(c.Home, c.Env); ok {
+		c.Cfg, c.Env = cfg, env
 	}
-	c.Cfg = m[0]
-	env := make([]string, 0, len(c.Env))
-	for _, e := range c.Env {
+}
+
+// AdminKvoEnv is env with KVO_CONFIG set to the admin context kvoadm init wrote under home, and that
+// file. ok is false (env unchanged) for an older kvoadm (kvo is the admin already) or several
+// clusters.
+func AdminKvoEnv(home string, env []string) (string, []string, bool) {
+	m, _ := filepath.Glob(filepath.Join(home, ".kevaso", "clusters", "*", "kvo-admin.yaml"))
+	if len(m) != 1 {
+		return "", env, false
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
 		if !strings.HasPrefix(e, "KVO_CONFIG=") {
-			env = append(env, e)
+			out = append(out, e)
 		}
 	}
-	c.Env = append(env, "KVO_CONFIG="+c.Cfg)
+	return m[0], append(out, "KVO_CONFIG="+m[0]), true
 }
 
 func (c *Cluster) MustKvoadm(args ...string) string {
