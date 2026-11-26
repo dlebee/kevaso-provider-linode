@@ -68,6 +68,25 @@ func TestLinode(t *testing.T) {
 	defer cancel()
 	b := newBed(t, tokenFile, "kevaso-e2e-")
 	t.Logf("run tag %s, region %s", b.Tag, b.Region)
+	// Reserved IPv4s carry no tag, so the sweep can't find them: each one the run learns of is
+	// released at the end (after the sweep has deleted the Linodes it was shared with), also when
+	// the run fails before its IP is deleted. Released already (the run passed): a 404, fine.
+	var reserved []string
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		for _, a := range reserved {
+			err := b.API.DeleteReservedIPAddress(dctx, a)
+			var le *linodego.Error
+			switch {
+			case err == nil:
+				t.Logf("released reserved %s (the run didn't)", a)
+			case errors.As(err, &le) && le.Code == 404: // released by the run
+			default:
+				t.Errorf("release reserved %s: %v", a, err)
+			}
+		}
+	})
 	b.CleanupAtEnd(t)
 
 	// Binaries: the CLIs for here, kevasod and the plugin for the Linodes.
@@ -103,10 +122,11 @@ func TestLinode(t *testing.T) {
 		defer cancel()
 		for name, m := range map[string]machine{"cp": cp, "w1": w1, "w2": w2} {
 			out, _ := b.SSH(dctx, m, "ls -la /run/kevaso-plugins/ /run/kevaso-plugins/* 2>&1; systemctl --no-pager status kevaso-plugin-linode 2>&1 | head -5; "+
-				"journalctl -u kevaso-plugin-linode -n 30 --no-pager 2>&1; journalctl -u kevasod -n 60 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -40")
+				"journalctl -u kevaso-plugin-linode -n 30 --no-pager 2>&1; journalctl -u kevasod -n 60 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -40; "+
+				"ip -4 -br addr; journalctl -u 'kevaso-plugin*' -n 20 --no-pager 2>&1; nft list ruleset 2>&1 | grep -n 'dport\\|daddr\\|saddr' | head -40")
 			t.Logf("── %s ──\n%s", name, out)
 		}
-		for _, args := range [][]string{{"get", "hosts", "-o", "yaml"}, {"get", "silos", "-A", "-o", "yaml"}} {
+		for _, args := range [][]string{{"get", "hosts", "-o", "yaml"}, {"get", "silos", "-A", "-o", "yaml"}, {"get", "ips", "-A", "-o", "yaml"}} {
 			c := exec.CommandContext(dctx, kvo, args...)
 			c.Env = cl.Env // the admin's, once kvoadm init ran
 			out, _ := c.CombinedOutput()
@@ -360,6 +380,7 @@ spec:
 		addr = ip.Status.Address
 		return addr != "", firstLine(out)
 	})
+	reserved = append(reserved, addr)
 	if r, err := b.API.GetReservedIPAddress(ctx, addr); err != nil || r.Region != b.Region {
 		t.Fatalf("%s isn't a reserved IPv4 in %s: %+v %v", addr, b.Region, r, err)
 	}
@@ -457,14 +478,15 @@ spec:
 
 	// 7. An IPSet of type Dynamic: each SiloSet instance its own Provider IP by ordinal, and
 	// 8. the namespace deleted with everything in it (kvo delete namespace, after its question).
-	testIPSetAndCascade(t, b, cl, kvo, []machine{cp, w1, w2}, nb, eventually)
+	testIPSetAndCascade(t, b, cl, kvo, []machine{cp, w1, w2}, nb, eventually, func(a string) { reserved = append(reserved, a) })
 }
 
 // testIPSetAndCascade: a Dynamic IPSet gives each instance of a SiloSet its own Provider IP
 // (pool-0, pool-1, reserved as the instances need them), each answering from its own instance;
 // then kvo delete namespace e2e, answered yes at its question, removes the silos, the balancer
 // and the IPs in order and leaves nothing in the account.
-func testIPSetAndCascade(t *testing.T, b *bed, cl *cluster, kvo string, ms []machine, nb bool, eventually func(string, time.Duration, func() (bool, string))) {
+func testIPSetAndCascade(t *testing.T, b *bed, cl *cluster, kvo string, ms []machine, nb bool, eventually func(string, time.Duration, func() (bool, string)),
+	reserved func(string)) {
 	t.Helper()
 	ctx := context.Background()
 	sh, must := cl.Run, cl.Must
@@ -540,6 +562,9 @@ spec:
 			if ip.Spec.Type != "Provider" || ip.Status.Address == "" || holder != "silo/"+n || ip.Metadata.Labels["kevaso.com/ipset"] != "pool" {
 				why = append(why, fmt.Sprintf("%s: type %s address %q holder %q labels %v", n, ip.Spec.Type, ip.Status.Address, holder, ip.Metadata.Labels))
 				continue
+			}
+			if addrs[n] == "" {
+				reserved(ip.Status.Address)
 			}
 			addrs[n] = ip.Status.Address
 		}
