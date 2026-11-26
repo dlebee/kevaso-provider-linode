@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -132,7 +133,7 @@ func (b *Bed) Create(ctx context.Context, role string) Machine {
 	_, _ = rand.Read(pw)
 	private := true
 	label := b.Tag + "-" + role
-	in, err := b.API.CreateInstance(ctx, linodego.InstanceCreateOptions{Region: b.Region, Type: "g6-nanode-1", Label: label,
+	in, err := b.createInstance(ctx, linodego.InstanceCreateOptions{Region: b.Region, Type: "g6-nanode-1", Label: label,
 		Image: "linode/ubuntu24.04", RootPass: hex.EncodeToString(pw) + "Aa1!", AuthorizedKeys: []string{b.Pub},
 		PrivateIP: private, Tags: []string{b.Tag, b.Family}})
 	if err != nil {
@@ -158,6 +159,37 @@ func (b *Bed) Create(ctx context.Context, role string) Machine {
 		"for i in $(seq 120); do fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done")
 	b.WaitSSH(ctx, m)
 	return m
+}
+
+// createInstance creates a Linode, and is safe to try again: when the answer is lost (the
+// connection reset after the POST was sent) the Linode may exist all the same, so before each new
+// try it looks for one with the label (unique to the run) and takes that one instead.
+func (b *Bed) createInstance(ctx context.Context, o linodego.InstanceCreateOptions) (*linodego.Instance, error) {
+	var last error
+	for try := 1; try <= 4; try++ {
+		in, err := b.API.CreateInstance(ctx, o)
+		if err == nil {
+			return in, nil
+		}
+		last = err
+		var le *linodego.Error
+		if errors.As(err, &le) && le.Code >= 400 && le.Code < 500 {
+			return nil, err // refused: trying again changes nothing
+		}
+		b.T.Logf("create %s (try %d): %v; looking for it before trying again", o.Label, try, err)
+		for look := 0; look < 3; look++ {
+			time.Sleep(10 * time.Second)
+			f, _ := json.Marshal(map[string]string{"label": o.Label})
+			if got, err := b.API.ListInstances(ctx, linodego.NewListOptions(0, string(f))); err == nil {
+				if len(got) == 1 {
+					b.T.Logf("%s was made all the same (%d): taking it", o.Label, got[0].ID)
+					return &got[0], nil
+				}
+				break // asked, and it isn't there
+			}
+		}
+	}
+	return nil, last
 }
 
 // WaitSSH waits (up to 5 minutes) until m answers SSH.
@@ -219,7 +251,19 @@ func (b *Bed) CreateAll(ctx context.Context, roles ...string) map[string]Machine
 	}
 	ch := make(chan made, len(roles))
 	for _, role := range roles {
-		go func() { ch <- made{role, b.CreateSteady(ctx, role)} }()
+		go func() {
+			sent := false
+			// A failed create ends this goroutine with t.Fatalf (runtime.Goexit): still answer,
+			// or CreateAll waits forever and the run's cleanup never runs.
+			defer func() {
+				if !sent {
+					ch <- made{role: role}
+				}
+			}()
+			m := b.CreateSteady(ctx, role)
+			sent = true
+			ch <- made{role, m}
+		}()
 	}
 	ms := map[string]Machine{}
 	for range roles {
