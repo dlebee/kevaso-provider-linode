@@ -241,6 +241,25 @@ func TestNodeBalancerRegion(t *testing.T) {
 // first holder's Linode; the silo moves (the confirmed move core makes) and the new holder's
 // Linode can announce it at once, since it is shared there already; a host in another region is
 // refused (out of reach).
+// On an account whose per-Linode IPv4 limit Linode support hasn't raised, the reserved address
+// can't be assigned to the holder's Linode: a conflict naming the fix, not Linode's bare 400.
+func TestProviderIPOverTheIPv4Limit(t *testing.T) {
+	f, p := newFakeAPI(t)
+	f.addLinode(11, "ca-central", "172.105.1.1")
+	f.oneIPv4 = true
+	st, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "ip-uid", Namespace: "payments", Name: "api-edge", Region: "ca-central"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.EnsureLoadBalancer(ctx, kplugin.LoadBalancer{Class: ClassSharedIP, ID: "ip-uid", Address: st.Address, Backends: []kplugin.HostInfo{torA}, Hosts: []kplugin.HostInfo{torA}})
+	if !errors.Is(err, kplugin.ErrConflict) || !strings.Contains(err.Error(), "Ask Linode support to allow more IPv4 addresses per Linode") || !strings.Contains(err.Error(), "tor-a") {
+		t.Fatalf("over the limit: %v", err)
+	}
+	if f.ips[st.Address]["linode_id"] != 0 || len(f.shared) != 0 {
+		t.Fatalf("assigned or shared all the same: %v %v", f.ips[st.Address], f.shared)
+	}
+}
+
 func TestProviderIPFollowsTheSilo(t *testing.T) {
 	f, p := newFakeAPI(t)
 	f.addLinode(11, "ca-central", "172.105.1.1")
