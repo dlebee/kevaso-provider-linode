@@ -857,7 +857,10 @@ func firstLine(s string) string {
 }
 
 func get(url string) (string, error) {
-	c := &http.Client{Timeout: 5 * time.Second}
+	// A new connection each time: a kept-alive one stays on the backend it was opened to (a
+	// NodeBalancer doesn't cut a TCP stream when a port's backend leaves), so it would show what
+	// the balancer did, not what it does now.
+	c := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	resp, err := c.Get(url)
 	if err != nil {
 		return "", err
