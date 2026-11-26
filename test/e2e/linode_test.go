@@ -291,6 +291,9 @@ spec:
 		})
 		t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.LoadBalancerIP)
 		must("", kvo, "delete", "ingress", "shop", "-n", "e2e")
+		// The class is cluster-wide and names e2e (its controller, its hosts): a namespace named from
+		// outside isn't deleted (step 8), so it goes with the DNS part.
+		must("", kvo, "delete", "ingressclass", "linode")
 	}
 
 	// 4b. Two silos sharing one NodeBalancer by name (linode.kevaso.com/nodebalancer: edge), each on
