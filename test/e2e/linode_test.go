@@ -499,7 +499,7 @@ func sharingRefused(t *testing.T, sh func(string, string, ...string) (string, er
 		out, err := sh("", kvo, "get", "ip", name, "-n", "e2e", "-o", "json")
 		var ip struct {
 			Status struct {
-				Conditions []struct{ Type, Status, Message string } `json:"conditions"`
+				Conditions []struct{ Type, Status, Reason, Message string } `json:"conditions"`
 			} `json:"status"`
 		}
 		if err != nil || json.Unmarshal([]byte(out), &ip) != nil {
@@ -509,7 +509,8 @@ func sharingRefused(t *testing.T, sh func(string, string, ...string) (string, er
 			if c.Type == "Shared" && c.Status == "True" {
 				return true, ""
 			}
-			if c.Type == "Shared" && strings.Contains(c.Message, "exceed maximum") {
+			// Waiting, naming the fix: Linode's per-Linode IPv4 limit, which its support raises.
+			if c.Type == "Shared" && c.Status == "False" && c.Reason == "Waiting" && strings.Contains(c.Message, "Ask Linode support to allow more IPv4 addresses per Linode") {
 				why = c.Message
 				return true, ""
 			}
