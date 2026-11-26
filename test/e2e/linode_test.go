@@ -764,6 +764,29 @@ spec:
 		}
 		return out
 	}
+	// configs: what Linode has on the shared NodeBalancer, port → backends.
+	configs := func() string {
+		var out []string
+		for _, nb := range ours() {
+			if nb.Label == nil || !strings.Contains(*nb.Label, "edge") {
+				continue
+			}
+			cs, err := b.API.ListNodeBalancerConfigs(ctx, nb.ID, nil)
+			if err != nil {
+				return err.Error()
+			}
+			for _, c := range cs {
+				nodes, _ := b.API.ListNodeBalancerNodes(ctx, nb.ID, c.ID, nil)
+				var at []string
+				for _, n := range nodes {
+					at = append(at, n.Address)
+				}
+				out = append(out, fmt.Sprintf("%d→%s", c.Port, strings.Join(at, ",")))
+			}
+			out = append(out, "tags "+strings.Join(nb.Tags, ","))
+		}
+		return "NodeBalancer edge: " + strings.Join(out, " ")
+	}
 	answers := func(url, want string) (bool, string) {
 		body, err := get(url)
 		return strings.Contains(body, want), fmt.Sprintf("%q %v", strings.TrimSpace(body), err)
@@ -795,7 +818,7 @@ spec:
 	eventually("8080 without shop-b once not ready, 8081 still on it", 5*time.Minute, func() (bool, string) {
 		on8080, got := answers("http://"+addr+":8080/", "shop-b answers")
 		on8081, got1 := answers("http://"+addr+":8081/", "shop-b answers")
-		return !on8080 && on8081, "8080 " + got + ", 8081 " + got1
+		return !on8080 && on8081, "8080 " + got + ", 8081 " + got1 + "; " + configs()
 	})
 	t.Logf("shop-b not ready: off 8080 %s later, still on 8081 (routeWhen per service)", time.Since(unready).Round(time.Second))
 	must("", kvo, "delete", "silo", "shop-a", "-n", "e2e")
