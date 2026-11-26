@@ -27,7 +27,10 @@ type fakeAPI struct {
 	records   map[int][]map[string]any
 	// hangDetach: detach requests to ignore (volume stays attached), like E032's first detach.
 	hangDetach int
-	calls      []string
+	// oneIPv4: a Linode takes no second public IPv4 (assign refused, as on an account whose
+	// per-Linode limit Linode support hasn't raised).
+	oneIPv4 bool
+	calls   []string
 }
 
 func newFakeAPI(t *testing.T) (*fakeAPI, *Provider) {
@@ -142,6 +145,12 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "POST" && p == "/networking/ips/assign":
 		for _, a := range body["assignments"].([]any) {
 			m := a.(map[string]any)
+			if f.oneIPv4 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(400)
+				reply(map[string]any{"errors": []map[string]any{{"reason": fmt.Sprintf("Assignment would exceed maximum for Linode %d.", int(m["linode_id"].(float64)))}}})
+				return
+			}
 			if ip, ok := f.ips[m["address"].(string)]; ok {
 				ip["linode_id"] = int(m["linode_id"].(float64))
 			}

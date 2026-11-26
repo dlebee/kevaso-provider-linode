@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/linode/linodego"
@@ -134,7 +135,20 @@ func (p *Provider) assignIfUnassigned(ctx context.Context, ip *linodego.Instance
 	}
 	if err := p.API.InstancesAssignIPs(ctx, linodego.LinodesAssignIPsOptions{Region: ip.Region,
 		Assignments: []linodego.LinodeIPAssignment{{Address: ip.Address, LinodeID: id}}}); err != nil {
+		if overLimit(err) {
+			// The message ends with the fix: the sentinel's text is trimmed off over gRPC.
+			return 0, fmt.Errorf("%s (Linode %d) can't take %s, which it shares from: Linode allows one public IPv4 per Linode "+
+				"until its support raises the limit. Ask Linode support to allow more IPv4 addresses per Linode on this account: %w",
+				backend.Name, id, ip.Address, kplugin.ErrConflict)
+		}
 		return 0, apiErr(fmt.Sprintf("assign %s to Linode %d", ip.Address, id), err)
 	}
 	return id, nil
+}
+
+// overLimit says whether Linode refused an assignment for the per-Linode IPv4 limit ([400]
+// Assignment would exceed maximum for Linode N).
+func overLimit(err error) bool {
+	var le *linodego.Error
+	return errors.As(err, &le) && le.Code == http.StatusBadRequest && strings.Contains(le.Error(), "exceed maximum")
 }

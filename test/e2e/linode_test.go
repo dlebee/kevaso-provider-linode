@@ -27,9 +27,11 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/linode/linodego"
 )
 
@@ -66,6 +68,25 @@ func TestLinode(t *testing.T) {
 	defer cancel()
 	b := newBed(t, tokenFile, "kevaso-e2e-")
 	t.Logf("run tag %s, region %s", b.Tag, b.Region)
+	// Reserved IPv4s carry no tag, so the sweep can't find them: each one the run learns of is
+	// released at the end (after the sweep has deleted the Linodes it was shared with), also when
+	// the run fails before its IP is deleted. Released already (the run passed): a 404, fine.
+	var reserved []string
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		for _, a := range reserved {
+			err := b.API.DeleteReservedIPAddress(dctx, a)
+			var le *linodego.Error
+			switch {
+			case err == nil:
+				t.Logf("released reserved %s (the run didn't)", a)
+			case errors.As(err, &le) && le.Code == 404: // released by the run
+			default:
+				t.Errorf("release reserved %s: %v", a, err)
+			}
+		}
+	})
 	b.CleanupAtEnd(t)
 
 	// Binaries: the CLIs for here, kevasod and the plugin for the Linodes.
@@ -101,10 +122,11 @@ func TestLinode(t *testing.T) {
 		defer cancel()
 		for name, m := range map[string]machine{"cp": cp, "w1": w1, "w2": w2} {
 			out, _ := b.SSH(dctx, m, "ls -la /run/kevaso-plugins/ /run/kevaso-plugins/* 2>&1; systemctl --no-pager status kevaso-plugin-linode 2>&1 | head -5; "+
-				"journalctl -u kevaso-plugin-linode -n 30 --no-pager 2>&1; journalctl -u kevasod -n 60 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -40")
+				"journalctl -u kevaso-plugin-linode -n 30 --no-pager 2>&1; journalctl -u kevasod -n 60 --no-pager 2>&1 | grep -iv 'heartbeat' | tail -40; "+
+				"ip -4 -br addr; journalctl -u 'kevaso-plugin*' -n 20 --no-pager 2>&1; nft list ruleset 2>&1 | grep -n 'dport\\|daddr\\|saddr' | head -40")
 			t.Logf("── %s ──\n%s", name, out)
 		}
-		for _, args := range [][]string{{"get", "hosts", "-o", "yaml"}, {"get", "silos", "-A", "-o", "yaml"}} {
+		for _, args := range [][]string{{"get", "hosts", "-o", "yaml"}, {"get", "silos", "-A", "-o", "yaml"}, {"get", "ips", "-A", "-o", "yaml"}} {
 			c := exec.CommandContext(dctx, kvo, args...)
 			c.Env = cl.Env // the admin's, once kvoadm init ran
 			out, _ := c.CombinedOutput()
@@ -269,6 +291,9 @@ spec:
 		})
 		t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.LoadBalancerIP)
 		must("", kvo, "delete", "ingress", "shop", "-n", "e2e")
+		// The class is cluster-wide and names e2e (its controller, its hosts): a namespace named from
+		// outside isn't deleted (step 8), so it goes with the DNS part.
+		must("", kvo, "delete", "ingressclass", "linode")
 	}
 
 	// 4b. Two silos sharing one NodeBalancer by name (linode.kevaso.com/nodebalancer: edge), each on
@@ -340,7 +365,10 @@ spec:
       type: HostPort
       hostPort: { ip: edge }
       ports: [{ port: http, as: 80 }]
+  network:
+    egress: { source: { ip: edge } }   # out from the address it answers on
 `, kvo, "apply", "-f", "-")
+	reservedAt := time.Now()
 	var addr string
 	eventually("the Provider IP reserved", 3*time.Minute, func() (bool, string) {
 		out, err := sh("", kvo, "get", "ip", "edge", "-n", "e2e", "-o", "json")
@@ -355,56 +383,83 @@ spec:
 		addr = ip.Status.Address
 		return addr != "", firstLine(out)
 	})
+	reserved = append(reserved, addr)
 	if r, err := b.API.GetReservedIPAddress(ctx, addr); err != nil || r.Region != b.Region {
 		t.Fatalf("%s isn't a reserved IPv4 in %s: %+v %v", addr, b.Region, r, err)
 	}
+	t.Logf("IP edge reserved as %s (a reserved IPv4 in %s) in %s", addr, b.Region, time.Since(reservedAt).Round(time.Second))
 	var edge siloStatus
 	eventually("edge running on the Provider IP", 8*time.Minute, func() (bool, string) {
 		edge = silo("edge")
 		return edge.Status.Phase == "Running", fmt.Sprintf("%+v", edge.Status)
 	})
-	first := edge.Status.Host
-	eventually("http://"+addr+"/ answered by edge on "+first, 5*time.Minute, func() (bool, string) {
-		body, err := get("http://" + addr + "/")
-		return strings.Contains(body, "edge answers"), fmt.Sprint(body, err)
-	})
-	t.Logf("%s answers from edge on %s (announced over BGP)", addr, first)
-	down := map[string]machine{"w1": w1, "w2": w2}[first]
-	if err := b.API.ShutdownInstance(ctx, down.ID); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("%s shut down", first)
-	start := time.Now()
-	// About a minute: the shut-down host cannot report FenceStopped, so edge is not started on the
-	// other worker by itself. A condition names kvo move --confirm-fenced when this test can read it.
-	otherHost := other(first)
-	var named string
-	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Second) {
-		edge = silo("edge")
-		if edge.Status.Host != "" && edge.Status.Host != first {
-			t.Fatalf("edge started on %s by itself after %s shut down: %+v", edge.Status.Host, first, edge.Status)
+	blocked := sharingRefused(t, sh, kvo, "edge", eventually)
+	if blocked == "" {
+		first := edge.Status.Host
+		eventually("http://"+addr+"/ answered by edge on "+first, 5*time.Minute, func() (bool, string) {
+			body, err := get("http://" + addr + "/")
+			return strings.Contains(body, "edge answers"), fmt.Sprint(body, err)
+		})
+		t.Logf("%s answers from edge on %s (announced over BGP), %s after the apply", addr, first, time.Since(reservedAt).Round(time.Second))
+		// Out from the same address: what an outside server sees edge's requests come from.
+		egressFrom := func(want string) {
+			t.Helper()
+			eventually("edge's traffic out from "+want, 3*time.Minute, func() (bool, string) {
+				out, err := sh("", kvo, "exec", "silo", "edge", "-n", "e2e", "--", "wget", "-qO-", "-T", "10", "http://api.ipify.org")
+				return err == nil && strings.TrimSpace(out) == want, fmt.Sprint(strings.TrimSpace(out), err)
+			})
 		}
-		for _, c := range edge.Status.Conditions {
-			if strings.Contains(c.Message, "--confirm-fenced") {
-				named = c.Message
+		egressFrom(addr)
+		t.Logf("edge's traffic out leaves from %s (egress.source ip: edge)", addr)
+		down := map[string]machine{"w1": w1, "w2": w2}[first]
+		if err := b.API.ShutdownInstance(ctx, down.ID); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s shut down", first)
+		start := time.Now()
+		// About a minute: the shut-down host cannot report FenceStopped, so edge is not started on the
+		// other worker by itself. A condition names kvo move --confirm-fenced when this test can read it.
+		otherHost := other(first)
+		var named string
+		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Second) {
+			edge = silo("edge")
+			if edge.Status.Host != "" && edge.Status.Host != first {
+				t.Fatalf("edge started on %s by itself after %s shut down: %+v", edge.Status.Host, first, edge.Status)
+			}
+			for _, c := range edge.Status.Conditions {
+				if strings.Contains(c.Message, "--confirm-fenced") {
+					named = c.Message
+				}
 			}
 		}
+		if named == "" {
+			t.Fatalf("edge's conditions never named --confirm-fenced while %s was shut down: %+v", first, edge.Status.Conditions)
+		}
+		t.Logf("edge was not started on %s by itself; a condition names the move: %s", otherHost, named)
+		moved := must("", kvo, "move", "silo", "edge", "-n", "e2e", "--to", otherHost, "--confirm-fenced", "--recreate")
+		t.Logf("kvo move edge --confirm-fenced --recreate: %s", strings.TrimSpace(moved))
+		eventually("edge running on the other worker", 6*time.Minute, func() (bool, string) {
+			edge = silo("edge")
+			return edge.Status.Host != "" && edge.Status.Host != first && edge.Status.Phase == "Running", fmt.Sprintf("%+v", edge.Status)
+		})
+		eventually("the Provider IP answering from "+edge.Status.Host, 3*time.Minute, func() (bool, string) {
+			body, err := get("http://" + addr + "/")
+			return strings.Contains(body, "edge answers"), fmt.Sprint(body, err)
+		})
+		t.Logf("%s answers again, from edge on %s, %s after %s went down", addr, edge.Status.Host, time.Since(start).Round(time.Second), first)
+		egressFrom(addr)
+		t.Logf("after the move edge's traffic still leaves from %s", addr)
+		// The shut-down worker comes back: the address stays with edge where it is.
+		b.PowerOn(ctx, down)
+		eventually(first+" Ready again", 5*time.Minute, func() (bool, string) {
+			hs, err := cl.Hosts()
+			return err == nil && hs[first].Ready(), fmt.Sprint(err)
+		})
+		if body, err := get("http://" + addr + "/"); !strings.Contains(body, "edge answers") {
+			t.Fatalf("%s stopped answering when %s came back: %q %v", addr, first, body, err)
+		}
+		t.Logf("%s is back; %s still answers from edge on %s", first, addr, edge.Status.Host)
 	}
-	if named == "" {
-		t.Fatalf("edge's conditions never named --confirm-fenced while %s was shut down: %+v", first, edge.Status.Conditions)
-	}
-	t.Logf("edge was not started on %s by itself; a condition names the move: %s", otherHost, named)
-	moved := must("", kvo, "move", "silo", "edge", "-n", "e2e", "--to", otherHost, "--confirm-fenced", "--recreate")
-	t.Logf("kvo move edge --confirm-fenced --recreate: %s", strings.TrimSpace(moved))
-	eventually("edge running on the other worker", 6*time.Minute, func() (bool, string) {
-		edge = silo("edge")
-		return edge.Status.Host != "" && edge.Status.Host != first && edge.Status.Phase == "Running", fmt.Sprintf("%+v", edge.Status)
-	})
-	eventually("the Provider IP answering from "+edge.Status.Host, 3*time.Minute, func() (bool, string) {
-		body, err := get("http://" + addr + "/")
-		return strings.Contains(body, "edge answers"), fmt.Sprint(body, err)
-	})
-	t.Logf("%s answers again, from edge on %s, %s after %s went down", addr, edge.Status.Host, time.Since(start).Round(time.Second), first)
 
 	// The silo goes, the IP stays (the next silo naming it gets the same address), shared nowhere;
 	// deleting the IP releases the reservation.
@@ -426,6 +481,265 @@ spec:
 		return errors.As(err, &le) && le.Code == 404, fmt.Sprint(err)
 	})
 	t.Logf("%s released with its IP", addr)
+
+	// 7. An IPSet of type Dynamic: each SiloSet instance its own Provider IP by ordinal, and
+	// 8. the namespace deleted with everything in it (kvo delete namespace, after its question).
+	testIPSetAndCascade(t, b, cl, kvo, []machine{cp, w1, w2}, nb, eventually, func(a string) { reserved = append(reserved, a) })
+}
+
+// sharingRefused waits for IP name's Shared condition: "" once it is shared with its holder's
+// Linode; Linode's refusal when the account can't share it (a reserved IPv4 must be assigned to a
+// Linode before it can be shared, and a Linode with its one public IPv4 can't take another without
+// a limit raised by Linode support). Then the test records the failure and goes on without the
+// parts that need the address to answer.
+func sharingRefused(t *testing.T, sh func(string, string, ...string) (string, error), kvo, name string, eventually func(string, time.Duration, func() (bool, string))) string {
+	t.Helper()
+	var why string
+	eventually("IP "+name+" shared with its holder's Linode (or refused)", 3*time.Minute, func() (bool, string) {
+		out, err := sh("", kvo, "get", "ip", name, "-n", "e2e", "-o", "json")
+		var ip struct {
+			Status struct {
+				Conditions []struct{ Type, Status, Reason, Message string } `json:"conditions"`
+			} `json:"status"`
+		}
+		if err != nil || json.Unmarshal([]byte(out), &ip) != nil {
+			return false, firstLine(out)
+		}
+		for _, c := range ip.Status.Conditions {
+			if c.Type == "Shared" && c.Status == "True" {
+				return true, ""
+			}
+			// Waiting, naming the fix: Linode's per-Linode IPv4 limit, which its support raises.
+			if c.Type == "Shared" && c.Status == "False" && c.Reason == "Waiting" && strings.Contains(c.Message, "Ask Linode support to allow more IPv4 addresses per Linode") {
+				why = c.Message
+				return true, ""
+			}
+		}
+		return false, fmt.Sprintf("%+v", ip.Status.Conditions)
+	})
+	if why != "" {
+		t.Errorf("BLOCKED: IP %s can't be shared on this account: %s. Not tested: its address answering, egress from it, following a move", name, why)
+	}
+	return why
+}
+
+// testIPSetAndCascade: a Dynamic IPSet gives each instance of a SiloSet its own Provider IP
+// (pool-0, pool-1, reserved as the instances need them), each answering from its own instance;
+// then kvo delete namespace e2e, answered yes at its question, removes the silos, the balancer
+// and the IPs in order and leaves nothing in the account.
+func testIPSetAndCascade(t *testing.T, b *bed, cl *cluster, kvo string, ms []machine, nb bool, eventually func(string, time.Duration, func() (bool, string)),
+	reserved func(string)) {
+	t.Helper()
+	ctx := context.Background()
+	sh, must := cl.Run, cl.Must
+	lb := ""
+	if nb {
+		lb = `---
+apiVersion: kevaso/v1
+kind: Silo
+metadata: { name: solo, namespace: e2e }
+spec:
+  runtime: docker
+  container:
+    image: docker.io/library/nginx:1.27-alpine
+    command: [sh, -c, "echo solo answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
+  resources: { memory: 128Mi }   # no CPU asked: a nanode has 1, which web or edge takes
+  ports: [{ name: http, port: 80 }]
+  services:
+    - { name: solo, type: LoadBalancer, loadBalancer: { provider: linode }, ports: [{ port: http }] }
+`
+	}
+	applied := time.Now()
+	must(`apiVersion: kevaso/v1
+kind: IPSet
+metadata: { name: pool, namespace: e2e }
+spec: { type: Dynamic, provider: linode, region: `+b.Region+`, max: 2 }
+---
+apiVersion: kevaso/v1
+kind: SiloSet
+metadata: { name: pool, namespace: e2e }
+spec:
+  instances: 2
+  ips: pool
+  template:
+    runtime: docker
+    container:
+      image: docker.io/library/nginx:1.27-alpine
+      command: [sh, -c, "hostname > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
+    resources: { memory: 128Mi }   # no CPU asked: a nanode has 1, which web or edge takes
+    ports: [{ name: http, port: 80 }]
+    services:
+      - type: HostPort
+        hostPort: { own: true }   # each instance its own member of pool
+        ports: [{ port: http, as: 80 }]
+`+lb, kvo, "apply", "-f", "-")
+	type ipView struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+		Spec struct {
+			Type string `json:"type"`
+		} `json:"spec"`
+		Status struct {
+			Address string `json:"address"`
+			Holder  *struct {
+				Holder string `json:"holder"` // silo/NAME
+			} `json:"holder"`
+		} `json:"status"`
+	}
+	addrs := map[string]string{} // member IP → address
+	eventually("pool-0 and pool-1 reserved, each held by its instance", 8*time.Minute, func() (bool, string) {
+		var why []string
+		for _, n := range []string{"pool-0", "pool-1"} {
+			out, err := sh("", kvo, "get", "ip", n, "-n", "e2e", "-o", "json")
+			var ip ipView
+			if err != nil || json.Unmarshal([]byte(out), &ip) != nil {
+				why = append(why, n+": "+firstLine(out))
+				continue
+			}
+			holder := ""
+			if ip.Status.Holder != nil {
+				holder = ip.Status.Holder.Holder
+			}
+			if ip.Spec.Type != "Provider" || ip.Status.Address == "" || holder != "silo/"+n || ip.Metadata.Labels["kevaso.com/ipset"] != "pool" {
+				why = append(why, fmt.Sprintf("%s: type %s address %q holder %q labels %v", n, ip.Spec.Type, ip.Status.Address, holder, ip.Metadata.Labels))
+				continue
+			}
+			if addrs[n] == "" {
+				reserved(ip.Status.Address)
+			}
+			addrs[n] = ip.Status.Address
+		}
+		return len(why) == 0 && addrs["pool-0"] != addrs["pool-1"], strings.Join(why, "; ")
+	})
+	for n, a := range addrs {
+		if r, err := b.API.GetReservedIPAddress(ctx, a); err != nil || r.Region != b.Region {
+			t.Fatalf("%s's %s isn't a reserved IPv4 in %s: %+v %v", n, a, b.Region, r, err)
+		}
+	}
+	t.Logf("IPSet pool: pool-0 %s, pool-1 %s, reserved IPv4s in %s, %s after the apply", addrs["pool-0"], addrs["pool-1"], b.Region, time.Since(applied).Round(time.Second))
+	for _, n := range []string{"pool-0", "pool-1"} {
+		if sharingRefused(t, sh, kvo, n, eventually) != "" {
+			continue
+		}
+		var name string
+		eventually(n+"'s own address answered by "+n, 8*time.Minute, func() (bool, string) {
+			hn, err := sh("", kvo, "exec", "silo", n, "-n", "e2e", "--", "hostname")
+			if err != nil {
+				return false, firstLine(hn)
+			}
+			name = strings.TrimSpace(hn)
+			body, err := get("http://" + addrs[n] + "/")
+			return strings.TrimSpace(body) == name, fmt.Sprintf("hostname %q, http://%s/ %q %v", name, addrs[n], strings.TrimSpace(body), err)
+		})
+		var s siloStatus
+		if out, err := sh("", kvo, "get", "silo", n, "-n", "e2e", "-o", "json"); err == nil {
+			_ = json.Unmarshal([]byte(out), &s)
+		}
+		t.Logf("http://%s/ answers from %s (hostname %s) on %s", addrs[n], n, name, s.Status.Host)
+	}
+	t.Logf("each instance has its own Provider IP (answering where Linode shares it), %s after the apply", time.Since(applied).Round(time.Second))
+	var soloAddr string
+	if nb {
+		eventually("solo behind its own NodeBalancer", 10*time.Minute, func() (bool, string) {
+			var s siloStatus
+			if out, err := sh("", kvo, "get", "silo", "solo", "-n", "e2e", "-o", "json"); err == nil {
+				_ = json.Unmarshal([]byte(out), &s)
+			}
+			soloAddr = s.Status.Service.LoadBalancerIP
+			if soloAddr == "" {
+				return false, fmt.Sprintf("%+v", s.Status)
+			}
+			body, err := get("http://" + soloAddr + "/")
+			return strings.Contains(body, "solo answers"), fmt.Sprint(body, err)
+		})
+		t.Logf("solo answers through its NodeBalancer %s", soloAddr)
+	}
+
+	// 8. kvo delete namespace e2e: with nobody to ask it refuses and names --yes; at a terminal it
+	// lists what is there, asks, and on yes deletes it all in order.
+	out, err := sh("", kvo, "delete", "namespace", "e2e")
+	if err == nil || !strings.Contains(out, "--yes") || !strings.Contains(out, "still holds") {
+		t.Fatalf("kvo delete namespace with no terminal: want a refusal naming --yes, got %v:\n%s", err, out)
+	}
+	t.Logf("with no terminal: %s", firstLine(out))
+	cascadeAt := time.Now()
+	answer, err := kvoAtTerminal(cl, kvo, "Are you sure?", "yes\n", 15*time.Minute, "delete", "namespace", "e2e")
+	if err != nil || !strings.Contains(answer, "namespace/e2e deleted") {
+		t.Fatalf("kvo delete namespace e2e, answered yes: %v\n%s", err, answer)
+	}
+	t.Logf("kvo delete namespace e2e (answered yes), %s:\n%s", time.Since(cascadeAt).Round(time.Second), answer)
+	if _, err := sh("", kvo, "get", "namespace", "e2e"); err == nil {
+		t.Fatal("namespace e2e still there")
+	}
+	eventually("nothing of e2e left in the account", 5*time.Minute, func() (bool, string) {
+		var left []string
+		for _, l := range b.Remaining(ctx) {
+			if !strings.HasPrefix(l, "Linode ") && !strings.HasPrefix(l, "domain ") {
+				left = append(left, l)
+			}
+		}
+		for n, a := range addrs {
+			if _, err := b.API.GetReservedIPAddress(ctx, a); err == nil {
+				left = append(left, n+" reserved "+a)
+			}
+		}
+		for _, m := range ms {
+			if ips, err := b.API.GetInstanceIPAddresses(ctx, m.ID); err != nil || ips.IPv4 == nil {
+				left = append(left, fmt.Sprint(m.Label, " ", err))
+			} else if len(ips.IPv4.Shared) > 0 {
+				left = append(left, fmt.Sprintf("%s shares %d", m.Label, len(ips.IPv4.Shared)))
+			}
+		}
+		return len(left) == 0, strings.Join(left, "; ")
+	})
+	t.Logf("namespace e2e deleted with its silos, NodeBalancer and IPs (released, shared nowhere): %s in all", time.Since(cascadeAt).Round(time.Second))
+}
+
+// kvoAtTerminal runs kvo on a terminal (a pty), waits for prompt and types answer: a person at
+// kvo's question.
+func kvoAtTerminal(cl *cluster, kvo, prompt, answer string, d time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, kvo, args...)
+	cmd.Env = cl.Env
+	f, err := pty.Start(cmd)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	var mu sync.Mutex
+	var buf strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p := make([]byte, 4096)
+		for {
+			n, err := f.Read(p)
+			mu.Lock()
+			buf.Write(p[:n])
+			mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	seen := func() string { mu.Lock(); defer mu.Unlock(); return buf.String() }
+	for !strings.Contains(seen(), prompt) {
+		select {
+		case <-ctx.Done():
+			return seen(), fmt.Errorf("no %q: %w", prompt, ctx.Err())
+		case <-done:
+			return seen(), fmt.Errorf("kvo ended before asking: %w", cmd.Wait())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	if _, err := f.Write([]byte(answer)); err != nil {
+		return seen(), err
+	}
+	err = cmd.Wait()
+	<-done
+	return seen(), err
 }
 
 // testSharedNodeBalancer: two silos, one NodeBalancer named edge, each on its own port.
@@ -433,26 +747,76 @@ func testSharedNodeBalancer(t *testing.T, b *bed, sh func(string, string, ...str
 	eventually func(string, time.Duration, func() (bool, string))) {
 	t.Helper()
 	ctx := context.Background()
-	shop := func(name, port string) string {
-		return `apiVersion: kevaso/v1
+	start := time.Now()
+	// A misspelled annotation is refused at apply (the plugin declares its annotations).
+	typo := `apiVersion: kevaso/v1
 kind: Silo
-metadata: { name: ` + name + `, namespace: e2e }
+metadata: { name: shop-typo, namespace: e2e }
+spec:
+  runtime: docker
+  container: { image: docker.io/library/nginx:1.27-alpine }
+  resources: { memory: 128Mi }   # no CPU asked: a nanode has 1, which web or edge takes
+  ports: [{ name: http, port: 80 }]
+  services:
+    - type: LoadBalancer
+      loadBalancer: { provider: linode }
+      annotations: { linode.kevaso.com/nodebalancr: edge }
+      ports: [{ port: http }]
+`
+	if out, err := sh(typo, kvo, "apply", "-f", "-"); err == nil || !strings.Contains(out, "nodebalancr") {
+		t.Fatalf("a misspelled annotation: want a refusal naming it, got %v:\n%s", err, out)
+	} else {
+		t.Logf("linode.kevaso.com/nodebalancr refused at apply: %s", strings.TrimSpace(out))
+	}
+	if _, err := sh("", kvo, "get", "silo", "shop-typo", "-n", "e2e"); err == nil {
+		t.Fatal("shop-typo was made although its apply was refused")
+	}
+	// shop-a: one service, routed as soon as it runs. shop-b: a readiness probe and two services
+	// on the same port: shop-b-live (routeWhen: running, as 8081) and shop-b (routeWhen: ready,
+	// as 8080), so 8080 has shop-b as its backend only while it is ready.
+	must(`apiVersion: kevaso/v1
+kind: Silo
+metadata: { name: shop-a, namespace: e2e }
 spec:
   runtime: docker
   container:
     image: docker.io/library/nginx:1.27-alpine
-    command: [sh, -c, "echo ` + name + ` answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
-  resources: { cpu: 1, memory: 128Mi }
+    command: [sh, -c, "echo shop-a answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
+  resources: { memory: 128Mi }   # no CPU asked: a nanode has 1, which web or edge takes
   ports: [{ name: http, port: 80 }]
   services:
-    - name: ` + name + `
+    - name: shop-a
       type: LoadBalancer
       loadBalancer: { provider: linode }
       annotations: { linode.kevaso.com/nodebalancer: edge }
-      ports: [{ port: http, as: ` + port + ` }]
-`
-	}
-	must(shop("shop-a", "80")+"---\n"+shop("shop-b", "8080"), kvo, "apply", "-f", "-")
+      ports: [{ port: http, as: 80 }]
+---
+apiVersion: kevaso/v1
+kind: Silo
+metadata: { name: shop-b, namespace: e2e }
+spec:
+  runtime: docker
+  container:
+    image: docker.io/library/nginx:1.27-alpine
+    command: [sh, -c, "echo shop-b answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
+  resources: { memory: 128Mi }   # no CPU asked: a nanode has 1, which web or edge takes
+  ports: [{ name: http, port: 80 }]
+  probes:
+    readiness: { exec: { command: [test, -f, /tmp/ready] }, period: 5s, failures: 2 }
+  services:
+    - name: shop-b-live
+      type: LoadBalancer
+      loadBalancer: { provider: linode }
+      annotations: { linode.kevaso.com/nodebalancer: edge }
+      routeWhen: running
+      ports: [{ port: http, as: 8081 }]
+    - name: shop-b
+      type: LoadBalancer
+      loadBalancer: { provider: linode }
+      annotations: { linode.kevaso.com/nodebalancer: edge }
+      routeWhen: ready
+      ports: [{ port: http, as: 8080 }]
+`, kvo, "apply", "-f", "-")
 	address := func(name string) string {
 		var s siloStatus
 		if out, err := sh("", kvo, "get", "silo", name, "-n", "e2e", "-o", "json"); err == nil {
@@ -470,29 +834,75 @@ spec:
 		}
 		return out
 	}
+	// configs: what Linode has on the shared NodeBalancer, port → backends.
+	configs := func() string {
+		var out []string
+		for _, nb := range ours() {
+			if nb.Label == nil || !strings.Contains(*nb.Label, "edge") {
+				continue
+			}
+			cs, err := b.API.ListNodeBalancerConfigs(ctx, nb.ID, nil)
+			if err != nil {
+				return err.Error()
+			}
+			for _, c := range cs {
+				nodes, _ := b.API.ListNodeBalancerNodes(ctx, nb.ID, c.ID, nil)
+				var at []string
+				for _, n := range nodes {
+					at = append(at, n.Address)
+				}
+				out = append(out, fmt.Sprintf("%d→%s", c.Port, strings.Join(at, ",")))
+			}
+			out = append(out, "tags "+strings.Join(nb.Tags, ","))
+		}
+		return "NodeBalancer edge: " + strings.Join(out, " ")
+	}
+	answers := func(url, want string) (bool, string) {
+		body, err := get(url)
+		return strings.Contains(body, want), fmt.Sprintf("%q %v", strings.TrimSpace(body), err)
+	}
 	var addr string
 	eventually("shop-a and shop-b on one NodeBalancer", 10*time.Minute, func() (bool, string) {
 		a, bb := address("shop-a"), address("shop-b")
 		addr = a
 		return a != "" && a == bb && len(ours()) == 2, fmt.Sprintf("shop-a %q, shop-b %q, NodeBalancers %d (web's and edge)", a, bb, len(ours()))
 	})
-	for url, want := range map[string]string{"http://" + addr + "/": "shop-a answers", "http://" + addr + ":8080/": "shop-b answers"} {
-		eventually(url+" → "+want, 5*time.Minute, func() (bool, string) {
-			body, err := get(url)
-			return strings.Contains(body, want), fmt.Sprint(body, err)
-		})
+	t.Logf("shop-a and shop-b on one NodeBalancer %s, %s after the apply", addr, time.Since(start).Round(time.Second))
+	for url, want := range map[string]string{"http://" + addr + "/": "shop-a answers", "http://" + addr + ":8081/": "shop-b answers"} {
+		eventually(url+" → "+want, 5*time.Minute, func() (bool, string) { return answers(url, want) })
 	}
-	t.Logf("one NodeBalancer %s: port 80 → shop-a, port 8080 → shop-b", addr)
+	t.Logf("one NodeBalancer %s: port 80 → shop-a, port 8081 → shop-b (routeWhen: running), %s after the apply", addr, time.Since(start).Round(time.Second))
+	// shop-b isn't ready: nothing answers on 8080 for a while.
+	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Second) {
+		if ok, got := answers("http://"+addr+":8080/", "shop-b answers"); ok {
+			t.Fatalf("port 8080 (routeWhen: ready) answered by shop-b before it was ready: %s", got)
+		}
+	}
+	t.Log("port 8080 (routeWhen: ready) has no backend while shop-b isn't ready")
+	must("", kvo, "exec", "silo", "shop-b", "-n", "e2e", "--", "touch", "/tmp/ready")
+	ready := time.Now()
+	eventually("8080 → shop-b once ready", 5*time.Minute, func() (bool, string) { return answers("http://"+addr+":8080/", "shop-b answers") })
+	t.Logf("shop-b ready: 8080 answers from it %s later", time.Since(ready).Round(time.Second))
+	must("", kvo, "exec", "silo", "shop-b", "-n", "e2e", "--", "rm", "/tmp/ready")
+	unready := time.Now()
+	eventually("8080 without shop-b once not ready, 8081 still on it", 5*time.Minute, func() (bool, string) {
+		on8080, got := answers("http://"+addr+":8080/", "shop-b answers")
+		on8081, got1 := answers("http://"+addr+":8081/", "shop-b answers")
+		return !on8080 && on8081, "8080 " + got + ", 8081 " + got1 + "; " + configs()
+	})
+	t.Logf("shop-b not ready: off 8080 %s later, still on 8081 (routeWhen per service)", time.Since(unready).Round(time.Second))
 	must("", kvo, "delete", "silo", "shop-a", "-n", "e2e")
 	eventually("edge kept for shop-b, port 80 gone", 5*time.Minute, func() (bool, string) {
-		body, err := get("http://" + addr + ":8080/")
+		ok, got := answers("http://"+addr+":8081/", "shop-b answers")
 		_, err80 := get("http://" + addr + "/")
-		return strings.Contains(body, "shop-b answers") && err80 != nil && len(ours()) == 2, fmt.Sprint(body, err, err80, len(ours()))
+		return ok && err80 != nil && len(ours()) == 2, fmt.Sprint(got, err80, len(ours()))
 	})
+	gone := time.Now()
 	must("", kvo, "delete", "silo", "shop-b", "-n", "e2e")
 	eventually("edge removed with its last service", 5*time.Minute, func() (bool, string) {
 		return len(ours()) == 1, fmt.Sprint(len(ours()), " NodeBalancers (web's left)")
 	})
+	t.Logf("edge removed %s after its last service's silo was deleted", time.Since(gone).Round(time.Second))
 	t.Log("the shared NodeBalancer stayed while a service used it, and went with the last")
 }
 
@@ -517,7 +927,10 @@ func firstLine(s string) string {
 }
 
 func get(url string) (string, error) {
-	c := &http.Client{Timeout: 5 * time.Second}
+	// A new connection each time: a kept-alive one stays on the backend it was opened to (a
+	// NodeBalancer doesn't cut a TCP stream when a port's backend leaves), so it would show what
+	// the balancer did, not what it does now.
+	c := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	resp, err := c.Get(url)
 	if err != nil {
 		return "", err
