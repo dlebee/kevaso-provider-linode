@@ -172,8 +172,8 @@ spec:
     command: [python3, -u, -c, %s]
   resources: { memory: 64Mi }
   ports: [{ name: web, port: %d }, { name: debug, port: %d }]
-  service:
-    ports: [{ port: web, hostPort: [external] }, { port: debug, hostPort: [external], %s }]
+  services:
+    - { type: HostPort, ports: [{ port: web }, { port: debug, %s }] }
 `, s.name, pyImage, pyServer(s.web, s.debug), s.web, s.debug, s.lease))
 	}
 	addr := map[string]string{}

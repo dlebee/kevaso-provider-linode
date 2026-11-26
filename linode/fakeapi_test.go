@@ -195,7 +195,16 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(list(filtered(values(f.nbs))))
 	case r.Method == "POST" && p == "/nodebalancers":
 		id := f.id()
-		nb := map[string]any{"id": id, "label": body["label"], "region": body["region"], "ipv4": fmt.Sprintf("172.233.0.%d", id%250), "tags": body["tags"]}
+		typ := body["type"]
+		if typ == nil {
+			typ = "common"
+		}
+		throttle := body["client_conn_throttle"]
+		if throttle == nil {
+			throttle = 0
+		}
+		nb := map[string]any{"id": id, "label": body["label"], "region": body["region"], "ipv4": fmt.Sprintf("172.233.0.%d", id%250), "tags": body["tags"],
+			"type": typ, "client_conn_throttle": throttle}
 		f.nbs[id] = nb
 		reply(nb)
 	case len(parts) >= 2 && parts[0] == "nodebalancers":
@@ -205,6 +214,13 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
+		case r.Method == "PUT" && len(parts) == 2:
+			for _, k := range []string{"tags", "client_conn_throttle", "label"} {
+				if v, ok := body[k]; ok {
+					f.nbs[nb][k] = v
+				}
+			}
+			reply(f.nbs[nb])
 		case r.Method == "DELETE" && len(parts) == 2:
 			delete(f.nbs, nb)
 			delete(f.configs, nb)
@@ -240,7 +256,9 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				c["nodes"] = body["nodes"]
 				c["port"] = body["port"]
-				c["algorithm"], c["proxy_protocol"] = body["algorithm"], body["proxy_protocol"]
+				for _, k := range []string{"algorithm", "proxy_protocol", "check", "check_interval", "check_timeout", "check_attempts"} {
+					c[k] = body[k]
+				}
 				reply(c)
 				return
 			}
