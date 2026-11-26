@@ -38,23 +38,24 @@ type Config struct {
 	TokenSecret *SecretRef `json:"tokenSecret,omitempty"`
 }
 
-// SecretRef names one key of a cluster secret (Key default value).
+// SecretRef names one key of a cluster secret: both are required.
 type SecretRef struct {
 	Name string `json:"name"`
-	Key  string `json:"key,omitempty"`
+	Key  string `json:"key"`
 }
 
 // credentialName is the systemd credential a key is loaded as: kevasod keeps the cluster secret as
-// a folder, and LoadCredential=NAME:FOLDER loads each key as NAME_KEY.
-func (c Config) credentialName() string {
+// a folder, and LoadCredential=NAME:FOLDER loads each key as NAME_KEY. A tokenSecret names its key:
+// none is assumed.
+func (c Config) credentialName() (string, error) {
 	r := SecretRef{Name: "linode", Key: "token"}
-	if c.TokenSecret != nil && c.TokenSecret.Name != "" {
+	if c.TokenSecret != nil {
 		r = *c.TokenSecret
-		if r.Key == "" {
-			r.Key = "value"
+		if r.Name == "" || r.Key == "" {
+			return "", fmt.Errorf(`tokenSecret names a cluster secret and its key: {"name": "linode", "key": "token"}`)
 		}
 	}
-	return r.Name + "_" + r.Key
+	return r.Name + "_" + r.Key, nil
 }
 
 func main() {
@@ -91,7 +92,11 @@ func run(ctx context.Context, cmd string, args []string) error {
 		fmt.Println(linode.Version)
 		return nil
 	case "serve":
-		token, err := credential(cfg.credentialName())
+		name, err := cfg.credentialName()
+		if err != nil {
+			return err
+		}
+		token, err := credential(name)
 		if err != nil {
 			return err
 		}

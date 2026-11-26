@@ -237,7 +237,7 @@ func haLight(t *testing.T, ctx context.Context, b *bed, k *kit, kevasod string) 
 	t.Log(c.MustKvoadm(append([]string{"host", "add", "root@" + ms["mw"].Public, "--external-ip", ms["mw"].Public, "--kevasod", kevasod, "--name", "mw",
 		"--install", "worker", "--runtime", "docker", "--region", b.Region}, ssh...)...))
 	c.MustKvo("apiVersion: kevaso/v1\nkind: Namespace\nmetadata: { name: mig }\n---\n"+h.silo("keep")+"---\n"+h.silo("gone"), "apply", "-f", "-")
-	c.MustKvo("a value kept across the move", "create", "secret", "s1", "-n", "mig", "--from-file", "-")
+	c.MustKvo("a value kept across the move", "create", "secret", "s1", "-n", "mig", "--from-file", "token=-")
 	h.running("keep", 8*time.Minute)
 	h.running("gone", 3*time.Minute)
 	if out, err := c.Kvoadm(append([]string{"host", "add", "root@" + ms["m2"].Public, "--external-ip", ms["m2"].Public, "--kevasod", kevasod, "--name", "m2", "--install", "control-plane"}, ssh...)...); err == nil || !strings.Contains(out, "kvoadm store migrate") {
@@ -259,7 +259,7 @@ func haLight(t *testing.T, ctx context.Context, b *bed, k *kit, kevasod string) 
 	if strings.Join(before, "\n") != strings.Join(after, "\n") {
 		t.Fatalf("objects changed in the move:\nbefore:\n%s\nafter:\n%s", strings.Join(before, "\n"), strings.Join(after, "\n"))
 	}
-	if out := c.MustKvo("", "get", "secret", "s1", "-n", "mig", "--reveal"); !strings.Contains(out, "a value kept across the move") {
+	if out := c.MustKvo("", "get", "secret", "s1", "-n", "mig", "--reveal", "--key", "token"); !strings.Contains(out, "a value kept across the move") {
 		t.Fatalf("secret after the move: %q", out)
 	}
 	// The worker's agent wasn't restarted: it re-lists by itself. A new silo starts, a deleted one goes.

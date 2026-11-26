@@ -760,7 +760,7 @@ func ha3Leader(t *testing.T, h *ha3) {
 		} else {
 			readErr = fmt.Sprint(err, " ", firstLine(out))
 		}
-		if out, err := h.kvoWithin(30*time.Second, h.url(survivor), "create", "secret", fmt.Sprintf("nq%d", reads), "-n", ns, "--from-file", "/dev/null"); err == nil {
+		if out, err := h.kvoWithin(30*time.Second, h.url(survivor), "create", "secret", fmt.Sprintf("nq%d", reads), "-n", ns, "--from-file", "token=/dev/null"); err == nil {
 			writesOK++
 		} else {
 			writeErr = fmt.Sprint(err, " ", firstLine(out))
@@ -1024,9 +1024,9 @@ func ha3Rejoin(t *testing.T, h *ha3) {
 	h.waitRunning(t, ns, 5*time.Minute, "while-1", "while-2", "gone")
 	h.c.MustKvo("", "delete", "silo", "gone", "-n", ns)
 	h.apply(t, strings.Replace(siloYAML(ns, "while-2", "w2"), "namespace: "+ns+" }", "namespace: "+ns+", labels: { kvt/changed: \"yes\" } }", 1))
-	h.c.MustKvo("written while "+x+" was off", "create", "secret", "s1", "-n", ns, "--from-file", "-")
+	h.c.MustKvo("written while "+x+" was off", "create", "secret", "s1", "-n", ns, "--from-file", "token=-")
 	for i := 0; i < 20; i++ { // and many revisions
-		h.c.MustKvo(fmt.Sprintf("value %d", i), "create", "secret", fmt.Sprintf("n%d", i), "-n", ns, "--from-file", "-")
+		h.c.MustKvo(fmt.Sprintf("value %d", i), "create", "secret", fmt.Sprintf("n%d", i), "-n", ns, "--from-file", "token=-")
 	}
 	h.waitRunning(t, ns, 5*time.Minute, "while-1", "while-2")
 	latest, _ := h.silo(ns, "while-2")
