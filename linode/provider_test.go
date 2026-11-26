@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -202,8 +203,8 @@ func TestSharedIP(t *testing.T) {
 	f.addLinode(10, "ca-central", "172.105.3.63") // the address's owner (a spare Linode, or an extra IP)
 	f.addLinode(11, "ca-central", "172.105.1.1")
 	f.addLinode(12, "ca-central", "172.105.2.2")
-	f.shared[12] = []string{"172.105.9.9"} // already shares something else: kept
-	p.Adopt = []string{"172.105.3.63"}     // tagged for Kevaso (K-044)
+	f.shared[12] = []string{"172.105.9.9"}   // already shares something else: kept
+	f.ips["172.105.3.63"]["reserved"] = true // reserved by Kevaso, assigned to 10 (K-044)
 	hosts := []kplugin.HostInfo{{Name: "a", ID: "11", Region: "ca-central"}, {Name: "b", ID: "12", Region: "ca-central"}}
 	lb := kplugin.LoadBalancer{Class: ClassSharedIP, ID: "u", Address: "172.105.3.63", Backends: hosts[:1], Hosts: hosts,
 		Ports: []kplugin.Port{{Name: "p2p", Protocol: "UDP", Port: 30303}}}
@@ -375,11 +376,10 @@ func TestLabelPrefix(t *testing.T) {
 	}
 }
 
-// Addresses apart from a load balancer (core's IP objects): a reserved IPv4 in a region, shared
-// with the region's hosts while a silo holds it (assigned to its first host), unshared when let go,
-// and released (the reservation deleted) when the IP is deleted. An address already in the account
-// is adopted and never given up. The NodeBalancer class can't reserve; its IP keeps the balancer,
-// parked with no configs while nobody holds it, deleted on release.
+// Provider IPs (IP type: Provider): a reserved IPv4 in a region, shared with the region's hosts
+// while a silo holds it (assigned to its first host) so whichever host has the silo announces it,
+// unshared when let go, and released (the reservation deleted) when the IP is deleted. Only
+// regions with BGP failover; no address asked for; the NodeBalancer class holds no address.
 func TestAddresses(t *testing.T) {
 	f, p := newFakeAPI(t)
 	f.addLinode(11, "ca-central", "172.105.1.1")
@@ -426,58 +426,38 @@ func TestAddresses(t *testing.T) {
 	if err := p.ReleaseAddress(ctx, ref); !errors.Is(err, kplugin.ErrNotFound) {
 		t.Fatalf("release twice: %v", err)
 	}
-	// One already in the account, tagged for Kevaso: adopted, never given up.
-	f.addLinode(10, "ca-central", "172.105.3.63")
-	p.Adopt = []string{"172.105.3.63"}
-	own, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "own", Region: "ca-central", Address: "172.105.3.63"})
-	if err != nil || own.Address != "172.105.3.63" || !strings.HasPrefix(own.Handle, "adopted:") {
-		t.Fatalf("adopt: %+v %v", own, err)
+	// Asking for an address, a region without BGP failover, an annotation on the IP: refused.
+	if _, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "own", Region: "ca-central", Address: "172.105.3.63"}); err == nil {
+		t.Fatal("a Provider IP with an address asked for")
 	}
-	if _, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "own", Region: "us-ord", Address: "172.105.3.63"}); err == nil {
-		t.Fatal("adopting from another region")
+	if _, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "y", Region: "mars-1"}); err == nil || !strings.Contains(err.Error(), "BGP") {
+		t.Fatalf("a region without BGP: %v", err)
 	}
-	if err := p.ReleaseAddress(ctx, kplugin.AddressRef{Class: ClassSharedIP, ID: "own", Address: own.Address, Handle: own.Handle}); err != nil {
-		t.Fatal(err)
+	if _, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "y", Region: "ca-central",
+		Annotations: map[string]string{"linode.kevaso.com/nodebalancer": "edge"}}); err == nil || !strings.Contains(err.Error(), "goes on service") {
+		t.Fatalf("a service annotation on an IP: %v", err)
 	}
-	if _, ok := f.ips["172.105.3.63"]; !ok {
-		t.Fatal("an adopted address was given up")
-	}
-
-	// The NodeBalancer: the IP's balancer, parked while nobody holds the IP, deleted on release.
-	tor := kplugin.HostInfo{Name: "tor", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"}
-	nb := kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: "nb-ip-uid", Namespace: "shop", Name: "web",
-		Ports: []kplugin.Port{{Name: "http", Protocol: "TCP", Port: 80, NodePort: 30000}}, Backends: []kplugin.HostInfo{tor}}
-	first, err := p.EnsureLoadBalancer(ctx, nb)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parked, err := p.EnsureLoadBalancer(ctx, kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: nb.ID, Namespace: "shop", Name: "web"})
-	if err != nil || parked.Address != first.Address || len(f.nbs) != 1 {
-		t.Fatalf("park: %+v %v (want %s kept)", parked, err, first.Address)
-	}
-	for id := range f.nbs {
-		if len(f.configs[id]) != 0 {
-			t.Fatalf("a parked NodeBalancer forwards: %v", f.configs[id])
-		}
-	}
-	again, err := p.EnsureLoadBalancer(ctx, nb) // a new holder
-	if err != nil || again.Address != first.Address {
-		t.Fatalf("a new holder: %+v %v", again, err)
-	}
-	if _, err := p.EnsureLoadBalancer(ctx, kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: "nothing"}); !errors.Is(err, kplugin.ErrNotFound) {
-		t.Fatalf("parking nothing: %v", err)
-	}
-	if err := p.ReleaseAddress(ctx, kplugin.AddressRef{Class: ClassNodeBalancer, ID: nb.ID, Address: first.Address}); err != nil || len(f.nbs) != 0 {
-		t.Fatalf("release: %v %v", err, f.nbs)
-	}
-	if err := p.ReleaseAddress(ctx, kplugin.AddressRef{Class: ClassNodeBalancer, ID: nb.ID}); !errors.Is(err, kplugin.ErrNotFound) {
-		t.Fatalf("release twice: %v", err)
+	if err := p.ReleaseAddress(ctx, kplugin.AddressRef{Class: ClassNodeBalancer, ID: "x"}); !errors.Is(err, kplugin.ErrNotFound) {
+		t.Fatalf("releasing a NodeBalancer nobody has: %v", err)
 	}
 }
 
 func TestInfoSaysWhatEachClassCan(t *testing.T) {
 	_, p := newFakeAPI(t)
 	info, _ := p.Info(ctx)
+	n := info.Networking
+	if err := n.Check(); err != nil || n == nil {
+		t.Fatalf("networking: %+v %v", n, err)
+	}
+	if !n.ProviderIPs || !n.LoadBalancers || n.FrontWithIP || !n.KeepsClientIP || n.Reach != kplugin.FollowsRegion || !n.OwnHostsOnly ||
+		!slices.Contains(n.Regions, "ca-central") || !slices.Contains(n.Regions, "us-ord") {
+		t.Errorf("networking: %+v", n)
+	}
+	for _, a := range n.Annotations {
+		if strings.Contains(a.Key, "kevaso.com") || !a.Goes(kplugin.OnService) || a.Goes(kplugin.OnIP) {
+			t.Errorf("annotation %+v: declared without the domain, on services", a)
+		}
+	}
 	for _, c := range info.LoadBalancers {
 		switch c.Name {
 		case ClassSharedIP:
@@ -489,65 +469,5 @@ func TestInfoSaysWhatEachClassCan(t *testing.T) {
 				t.Errorf("%s: its address is the balancer's, on no host: %+v", c.Name, c)
 			}
 		}
-	}
-}
-
-// The services sharing an IP share its NodeBalancer: a config per port, each to its own service's
-// hosts; annotations set a port's algorithm and proxy protocol (the IP's for all, a service's for
-// its own); unknown ones in linode.kevaso.com/ are refused, others ignored; a port twice is refused.
-func TestSharedNodeBalancer(t *testing.T) {
-	f, p := newFakeAPI(t)
-	tor := kplugin.HostInfo{Name: "tor", ID: "11", Region: "ca-central", PrivateAddress: "192.168.140.7"}
-	tor2 := kplugin.HostInfo{Name: "tor2", ID: "13", Region: "ca-central", PrivateAddress: "192.168.150.9"}
-	lb := kplugin.LoadBalancer{Class: ClassNodeBalancer, ID: "default-ip-uid", Namespace: "shop", Name: "default-linode-nodebalancer",
-		Backends:    []kplugin.HostInfo{tor, tor2},
-		Annotations: map[string]string{AnnotationAlgorithm: "leastconn", "example.com/other": "ignored"},
-		Ports: []kplugin.Port{
-			{Name: "http", Protocol: "TCP", Port: 80, NodePort: 30000, Service: "silo/web", Backends: []kplugin.HostInfo{tor}},
-			{Name: "rpc", Protocol: "TCP", Port: 8545, NodePort: 30001, Service: "service/rpc", Backends: []kplugin.HostInfo{tor, tor2},
-				Annotations: map[string]string{AnnotationProxyProtocol: "v2", AnnotationAlgorithm: "source"}}}}
-	st, err := p.EnsureLoadBalancer(ctx, lb)
-	if err != nil || st.Address == "" || len(f.nbs) != 1 {
-		t.Fatalf("ensure: %+v %v %v", st, err, f.nbs)
-	}
-	var got []string
-	for _, cs := range f.configs {
-		for _, c := range cs {
-			var nodes []string
-			for _, n := range c["nodes"].([]any) {
-				nodes = append(nodes, n.(map[string]any)["address"].(string))
-			}
-			got = append(got, fmt.Sprint(c["port"], " ", c["algorithm"], " ", c["proxy_protocol"], " ", strings.Join(nodes, ",")))
-		}
-	}
-	sort.Strings(got)
-	if want := "80 leastconn none 192.168.140.7:30000|8545 source v2 192.168.140.7:30001,192.168.150.9:30001"; strings.Join(got, "|") != want {
-		t.Fatalf("configs:\n%s\nwant\n%s", strings.Join(got, "|"), want)
-	}
-	// One service leaves: same NodeBalancer, same address, its config gone.
-	one := lb
-	one.Ports = lb.Ports[:1]
-	if st2, err := p.EnsureLoadBalancer(ctx, one); err != nil || st2.Address != st.Address || len(f.nbs) != 1 {
-		t.Fatalf("a service gone: %+v %v", st2, err)
-	}
-	for _, cs := range f.configs {
-		if len(cs) != 1 {
-			t.Fatalf("configs after: %v", cs)
-		}
-	}
-	bad := one
-	bad.Annotations = map[string]string{"linode.kevaso.com/sticky": "yes"}
-	if _, err := p.EnsureLoadBalancer(ctx, bad); err == nil || !strings.Contains(err.Error(), "unknown annotation linode.kevaso.com/sticky") {
-		t.Fatalf("an unknown annotation: %v", err)
-	}
-	bad.Annotations = map[string]string{AnnotationAlgorithm: "random"}
-	if _, err := p.EnsureLoadBalancer(ctx, bad); err == nil {
-		t.Fatal("a bad algorithm")
-	}
-	twice := lb
-	twice.Ports = []kplugin.Port{lb.Ports[0], lb.Ports[0]}
-	twice.Ports[1].Service = "silo/other"
-	if _, err := p.EnsureLoadBalancer(ctx, twice); err == nil || !strings.Contains(err.Error(), "port 80") {
-		t.Fatalf("a port twice: %v", err)
 	}
 }

@@ -12,8 +12,8 @@ What it serves:
 | | Name | What you get |
 |---|---|---|
 | Hosts | | Workers that are Linodes are recognised by their external or internal IP: `kvo describe host` shows the Linode and region, and the Linode's private address becomes the host's internal IP when the operator set none ([Addresses](#addresses)) |
-| Load balancer | `linode-nodebalancer` | One NodeBalancer per `IP`, shared by every service on it (by default, all of a namespace's services of the class), a config per port, each to its own service's hosts over the private network. Its address is the balancer's: kept with the `IP` across moves and holders (parked, forwarding nowhere, while nobody holds it), on no host, so a silo can't send from it. Annotations on the `IP` or a service: `linode.kevaso.com/algorithm` (roundrobin, leastconn, source) and `linode.kevaso.com/proxy-protocol` (none, v1, v2); others in that domain are refused |
-| Load balancer | `linode-shared-ip` | Exclusive (one host announces it, so one silo holds it): a reserved IPv4 (`kvo create ip NAME --class linode-shared-ip --region R`), or one you already own that is tagged for Kevaso (the `IP`'s `spec.address`, listed in the config's `adopt`), shared between the region's Linodes and announced by whichever host has the silo, so it follows the silo and the silo can send from it (`egress.source: sameAsService`) |
+| Load balancers | NodeBalancers | A service of `type: LoadBalancer` with `loadBalancer: { provider: linode }` gets its own NodeBalancer, a config per port, each to the ready silos' hosts on a node port over the private network (the node port is open to the NodeBalancer only). Services of one namespace that name the same `linode.kevaso.com/nodebalancer` share one, each on its own ports; it is made with the first and removed with the last. Its address is its own (a kept IP can't front it), on no host, so a silo can't send from it |
+| Provider IPs | reserved IPv4s | An `IP` of `type: Provider, provider: linode, region: R` is a Linode reserved IPv4 in R, shared with the region's Linodes and announced over BGP by whichever worker runs the silo using it (`hostPort: { ip: NAME }`), so it follows the silo within the region and the silo can send from it. Only regions with Linode's BGP failover. Deleting the silo keeps it; deleting the `IP` releases it |
 | Storage | `linode-block` | Block Storage, created in the host's region, attached to it, formatted once and mounted for a container silo |
 | DNS | `linode` | Linode DNS records for an IngressClass's host names, and for ACME DNS-01 |
 
@@ -21,11 +21,27 @@ An address reserved for an `IP` is remembered by the plugin until core records i
 crashes in between leaves an unused reserved IPv4 in the account (Linode's reserved IPs carry no
 label to find it by): the account's reserved IPs (Cloud Manager, or `GET /v4/networking/reserved/ips`) show them.
 
-An address the account already holds is used only if it is **tagged for Kevaso**: listed in the
-config's `adopt` (`{"adopt": ["203.0.113.7"]}`; Linode's IP addresses carry no tags of their own).
-An `IP` naming any other address is refused. The provider shares, and on release unshares, only an
-address it reserved or one so listed: a machine's own address, and sharing set up outside Kevaso,
-are never touched.
+The provider shares, and on release unshares, only addresses it reserved: a machine's own address,
+and sharing set up outside Kevaso, are never touched.
+
+### Annotations
+
+Declared to core, which refuses a misspelled one or a bad value at apply. Under the name the
+plugin is installed as (`linode-work.kevaso.com/…` for a second account); on a LoadBalancer
+service:
+
+| Annotation | Values | Default |
+|---|---|---|
+| `linode.kevaso.com/nodebalancer` | a name (lower-case letters, digits, `-`; 19 at most): share that NodeBalancer with the namespace's services naming it | one per service |
+| `linode.kevaso.com/nodebalancer-type` | `common`, `premium` (Linode has plan types, not sizes); fixed when it is made | `common` |
+| `linode.kevaso.com/client-conn-throttle` | 0–20 new connections per second per client IP; 0 is no limit | 0 |
+| `linode.kevaso.com/algorithm` | `roundrobin`, `leastconn`, `source` | `roundrobin` |
+| `linode.kevaso.com/proxy-protocol` | `none`, `v1`, `v2`: the client's address to the silo (it must speak PROXY protocol on that port); the only way a silo sees it behind a NodeBalancer | `none` |
+| `linode.kevaso.com/check` | `connection`, `none` | `connection` |
+| `linode.kevaso.com/check-interval`, `check-timeout`, `check-attempts` | seconds (2–3600), seconds (1–30, below the interval), tries (1–30) | 5, 3, 2 |
+
+Services sharing a NodeBalancer share its type and throttle: the type is the first one's (another
+type is refused), the throttle the last one set.
 
 ## Addresses
 

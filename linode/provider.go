@@ -2,11 +2,11 @@
 // Linode API token and serves, over the plugin protocol (kevaso.com/core/sdk/kplugin):
 //
 //   - hosts: which cluster hosts are Linodes (by address), their region and private address;
-//   - load-balancer class linode-nodebalancer: a NodeBalancer per IP, shared by the services on it,
-//     sending each port to its service's hosts on a node port, over the region's private network;
-//   - load-balancer class linode-shared-ip (exclusive: one host announces it): a reserved IPv4 (or one you already own), shared with
-//     every Linode host in its region and announced over BGP by whichever host has the silo
-//     (research E031); it is reserved and released apart from any silo (core's IP objects);
+//   - networking v2 (Info.Networking): LoadBalancer services on NodeBalancers (class
+//     linode-nodebalancer: one per service, or shared by name), each port to its service's hosts
+//     on a node port over the region's private network; Provider IPs as reserved IPv4s (class
+//     linode-shared-ip), shared with every Linode in their region and announced over BGP by
+//     whichever host has the silo (research E031), so they follow the silo in its region;
 //   - storage class linode-block: Block Storage volumes, attached to the silo's host; a detach can
 //     hang, so it's started, polled for a while, and asked again later (E032);
 //   - DNS provider linode: records in Linode DNS Manager, for Ingress host names and DNS-01.
@@ -52,10 +52,6 @@ type Config struct {
 	// LabelPrefix, if set, replaces the "kvo-" that starts the labels of the volumes and
 	// NodeBalancers it creates, for telling apart what several clusters made in one account.
 	LabelPrefix string `json:"labelPrefix,omitempty"`
-	// Adopt are the IPv4 addresses already in the account that an IP object of class
-	// linode-shared-ip may name (spec.address): the addresses tagged for Kevaso (Linode's IP
-	// addresses carry no tags of their own). Any other is refused, and never shared or unshared.
-	Adopt []string `json:"adopt,omitempty"`
 }
 
 // Provider is the Linode provider.
@@ -64,8 +60,6 @@ type Provider struct {
 	Tags []string // on everything created ("kevaso" first)
 	// LabelPrefix replaces "kvo-" at the start of the labels it gives (Config.LabelPrefix).
 	LabelPrefix string
-	// Adopt are the IPv4 addresses already in the account that are tagged for Kevaso (Config.Adopt).
-	Adopt []string
 	// AttachWait and DetachWait are how long one call waits for an attach or detach to finish
 	// before answering kplugin.ErrInProgress (default 20s each). DetachRetry is how long after
 	// asking for a detach it's asked again (one detach hung for over 5 minutes in E032; a second
@@ -86,6 +80,8 @@ type Provider struct {
 	// sharing: one lock per Linode around a read-change-write of its shared-IP list (the API
 	// replaces the whole list, so two at once would lose one's change; audit K-055).
 	sharing map[int]*sync.Mutex
+	// nbLocks: one lock per NodeBalancer (by label) around a change of its tags and configs.
+	nbLocks map[string]*sync.Mutex
 }
 
 // sharingLock is the lock of a Linode's shared-IP list.
@@ -114,7 +110,7 @@ const (
 
 // New returns a provider using token.
 func New(token string, cfg Config) *Provider {
-	return &Provider{API: NewClient(token), Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix, Adopt: cfg.Adopt}
+	return &Provider{API: NewClient(token), Tags: append([]string{"kevaso"}, cfg.Tags...), LabelPrefix: cfg.LabelPrefix}
 }
 
 // NewClient is the provider's Linode API client: bounded retries and request timeouts.
@@ -157,17 +153,16 @@ func (p *Provider) dur(d, def time.Duration) time.Duration {
 	return def
 }
 
-// Info implements kplugin.Plugin.
+// Info implements kplugin.Plugin. The classes are how core names what it asks for on the wire;
+// Networking is what services and IPs may use.
 func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 	return kplugin.Info{Name: "linode", Version: Version, Protocol: kplugin.Protocol, Hosts: true,
 		LoadBalancers: []kplugin.Class{
-			// Its address is the NodeBalancer's: on no host, so nothing sends from it, and no
-			// reservation apart from the balancer (the IP keeps the balancer instead). Shared: one
-			// NodeBalancer carries every service on the IP, a config per port.
-			{Name: ClassNodeBalancer, Description: "a Linode NodeBalancer, to the silo's host over the private network", OwnHostsOnly: true, NodePorts: true,
+			// A service's NodeBalancer: its own address, on no host, so nothing sends from it.
+			{Name: ClassNodeBalancer, Description: "a Linode NodeBalancer per service (or shared by name), to the silo's host over the private network", OwnHostsOnly: true, NodePorts: true,
 				Follows: kplugin.FollowsRegion},
-			// A reserved IPv4, shared between the region's Linodes and announced by the silo's host:
-			// it follows the silo in its region, and the silo can send from it.
+			// A Provider IP: a reserved IPv4, shared between the region's Linodes and announced by
+			// the silo's host: it follows the silo in its region, and the silo can send from it.
 			{Name: ClassSharedIP, Description: "a reserved IPv4, shared between the region's Linodes, announced over BGP by the silo's host", OwnHostsOnly: true, Announce: true,
 				Reserve: true, SendsFrom: true, Exclusive: true, Follows: kplugin.FollowsRegion},
 		},
@@ -175,7 +170,8 @@ func (p *Provider) Info(context.Context) (kplugin.Info, error) {
 		// can move within the region (design §0.3).
 		Storage: []kplugin.Class{{Name: ClassBlock, Description: "Linode Block Storage, attached to the silo's host", OwnHostsOnly: true,
 			Topology: kplugin.TopologyRegion}},
-		DNS: []string{DNSName}}, nil
+		DNS:        []string{DNSName},
+		Networking: Networking()}, nil
 }
 
 // instancesNow lists the account's Linodes (cached for 30 s: describing many hosts is one call).

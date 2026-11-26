@@ -11,9 +11,9 @@
 //     same Linode volumes; one removed from the spec is detached and kept until the silo is deleted (core #14); a label already
 //     taken by a volume Kevaso didn't make is refused, never adopted (K-035); everything deleted with
 //     the silo, and only then; a volume name too long for a label refused by admission;
-//   - Kevaso's own rules, checked from this Mac: a port opened with hostPort: [external] answers;
+//   - Kevaso's own rules, checked from this Mac: a HostPort service on the worker's external address answers;
 //     every other TCP listener on every machine (but SSH, and the API on the control plane) is
-//     closed from here; [internal] answers on the private network only.
+//     closed from here; one on worker: internal answers on the private network only.
 //
 // Skipped, with the reason: NodeBalancers and DNS (the token has no NodeBalancers or Domains
 // scope: TestLinode covers them when it does), and a Linode Cloud Firewall (the provider makes
@@ -430,8 +430,8 @@ func closedFromHere(addr string) (bool, string) {
 func pfRules(t *testing.T, h *ha3) {
 	const ns = "rules"
 	h.namespace(t, ns)
-	h.apply(t, siloYAML(ns, "open", "w1", "ports: [{ name: http, port: 80 }]", "service:", "  ports: [{ port: http, hostPort: [external], as: 18080 }]")+"---\n"+
-		siloYAML(ns, "inner", "w1", "ports: [{ name: http, port: 80 }]", "service:", "  ports: [{ port: http, hostPort: [internal], as: 18096 }]")+"---\n"+
+	h.apply(t, siloYAML(ns, "open", "w1", "ports: [{ name: http, port: 80 }]", "services:", "  - { type: HostPort, ports: [{ port: http, as: 18080 }] }")+"---\n"+
+		siloYAML(ns, "inner", "w1", "ports: [{ name: http, port: 80 }]", "services:", "  - { type: HostPort, hostPort: { worker: internal }, ports: [{ port: http, as: 18096 }] }")+"---\n"+
 		siloYAML(ns, "quiet", "w2", "ports: [{ name: http, port: 80 }]"))
 	h.waitRunning(t, ns, 10*time.Minute, "open", "inner", "quiet")
 	w1 := h.ms["w1"]
