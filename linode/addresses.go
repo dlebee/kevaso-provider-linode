@@ -32,6 +32,9 @@ func (p *Provider) ReserveAddress(ctx context.Context, r kplugin.AddressReservat
 	if _, err := settings(kplugin.OnIP, r.Annotations); err != nil {
 		return kplugin.AddressStatus{}, err
 	}
+	if r.Family == "IPv6" { // refused at apply (Networking declares no IPv6 Provider IPs)
+		return kplugin.AddressStatus{}, fmt.Errorf("linode can't float an IPv6 address: %s: %w", NoProviderIPv6, kplugin.ErrUnsupported)
+	}
 	if r.Address != "" {
 		return kplugin.AddressStatus{}, fmt.Errorf("a Provider IP is reserved by Linode: it can't be asked for an address (%s)", r.Address)
 	}

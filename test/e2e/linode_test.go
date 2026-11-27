@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -43,8 +44,9 @@ type siloStatus struct {
 		Phase   string `json:"phase"`
 		Host    string `json:"host"`
 		Service struct {
-			LoadBalancerIP string `json:"loadBalancerIP"`
-			NodePorts      []struct {
+			LoadBalancerIP   string `json:"loadBalancerIP"`
+			LoadBalancerIPv6 string `json:"loadBalancerIPv6"`
+			NodePorts        []struct {
 				NodePort int `json:"nodePort"`
 			} `json:"nodePorts"`
 		} `json:"service"`
@@ -188,31 +190,42 @@ func TestLinode(t *testing.T) {
 		}
 		return n == 2, strings.Join(seen, "; ")
 	})
+	// The IPv6 effort: each worker's own IPv6 is found (its SLAAC address).
+	workers := map[string]machine{"w1": w1, "w2": w2}
+	ext6 := testWorkersIPv6(t, b, sh, kvo, workers, eventually)
 
-	// 4. A container silo with a Block Storage volume behind a NodeBalancer, and an Ingress class
-	// publishing its host name in Linode DNS.
-	zone := b.Tag + ".kevaso.com"
-	dns := true
-	if _, err := b.API.CreateDomain(ctx, linodego.DomainCreateOptions{Domain: zone, Type: linodego.DomainTypeMaster,
-		SOAEmail: "hostmaster@kevaso.com", Tags: []string{b.Tag}}); err != nil {
-		var le *linodego.Error
-		if !errors.As(err, &le) || (le.Code != 401 && le.Code != 403) {
-			t.Fatalf("test zone: %v", err)
+	// KEVASO_E2E_ONLY=provider-ip runs the Provider IP part alone (step 6: its holder down, a
+	// confirmed move, the former holder back), skipping 4, 5 and 7–8.
+	focus := os.Getenv("KEVASO_E2E_ONLY") == "provider-ip"
+	nb := false // the token can use NodeBalancers (step 4 finds out)
+	if focus {
+		must("apiVersion: kevaso/v1\nkind: Namespace\nmetadata: { name: e2e }\n", kvo, "apply", "-f", "-")
+		t.Log("KEVASO_E2E_ONLY=provider-ip: only the Provider IP part (step 6)")
+	} else {
+		// 4. A container silo with a Block Storage volume behind a NodeBalancer, and an Ingress class
+		// publishing its host name in Linode DNS.
+		zone := b.Tag + ".kevaso.com"
+		dns := true
+		if _, err := b.API.CreateDomain(ctx, linodego.DomainCreateOptions{Domain: zone, Type: linodego.DomainTypeMaster,
+			SOAEmail: "hostmaster@kevaso.com", Tags: []string{b.Tag}}); err != nil {
+			var le *linodego.Error
+			if !errors.As(err, &le) || (le.Code != 401 && le.Code != 403) {
+				t.Fatalf("test zone: %v", err)
+			}
+			dns = false
+			t.Logf("SKIPPING the DNS part: this token can't use Domains (%v); give it Domains read/write to test it", err)
 		}
-		dns = false
-		t.Logf("SKIPPING the DNS part: this token can't use Domains (%v); give it Domains read/write to test it", err)
-	}
-	nb := true
-	if _, err := b.API.ListNodeBalancers(ctx, nil); err != nil {
-		var le *linodego.Error
-		if !errors.As(err, &le) || (le.Code != 401 && le.Code != 403) {
-			t.Fatalf("NodeBalancers: %v", err)
+		nb = true
+		if _, err := b.API.ListNodeBalancers(ctx, nil); err != nil {
+			var le *linodego.Error
+			if !errors.As(err, &le) || (le.Code != 401 && le.Code != 403) {
+				t.Fatalf("NodeBalancers: %v", err)
+			}
+			nb, dns = false, false // the Ingress's address would be the NodeBalancer's
+			t.Logf("SKIPPING the NodeBalancer part: this token can't use NodeBalancers (%v); give it NodeBalancers read/write to test it", err)
 		}
-		nb, dns = false, false // the Ingress's address would be the NodeBalancer's
-		t.Logf("SKIPPING the NodeBalancer part: this token can't use NodeBalancers (%v); give it NodeBalancers read/write to test it", err)
-	}
-	// One NodeBalancer for the service (networking v2: one per LoadBalancer service by default).
-	exposure := `
+		// One NodeBalancer for the service (networking v2: one per LoadBalancer service by default).
+		exposure := `
   ports: [{ name: http, port: 80 }]
   services:
     - name: web
@@ -220,17 +233,17 @@ func TestLinode(t *testing.T) {
       loadBalancer: { provider: linode }
       ports: [{ port: http }]
 `
-	if !nb {
-		exposure = `
+		if !nb {
+			exposure = `
   ports: [{ name: http, port: 80 }]
   services:
     - { name: web, ports: [{ port: http }] }
 `
-	}
-	// web is also the class's controller: the nginx driver writes its nginx.conf (one server per
-	// Ingress host, 404 for any other), so the Ingress goes in after the page has been fetched at
-	// the bare address.
-	ingress := `apiVersion: kevaso/v1
+		}
+		// web is also the class's controller: the nginx driver writes its nginx.conf (one server per
+		// Ingress host, 404 for any other), so the Ingress goes in after the page has been fetched at
+		// the bare address.
+		ingress := `apiVersion: kevaso/v1
 kind: IngressClass
 metadata: { name: linode }
 spec:
@@ -247,7 +260,7 @@ spec:
   tls: { none: true }
   rules: [{ path: /, service: { name: web, port: http } }]
 `
-	must(`apiVersion: kevaso/v1
+		must(`apiVersion: kevaso/v1
 kind: Namespace
 metadata: { name: e2e }
 ---
@@ -265,77 +278,85 @@ spec:
       - name: page
         run: |
           [ -f /usr/share/nginx/html/index.html ] || echo "served from a Linode volume" > /usr/share/nginx/html/index.html`+exposure, kvo, "apply", "-f", "-")
-	var web siloStatus
-	eventually("web running with its volume and NodeBalancer", 10*time.Minute, func() (bool, string) {
-		web = silo("web")
-		ok := web.Status.Phase == "Running" && (web.Status.Service.LoadBalancerIP != "" || !nb) && len(web.Status.Volumes) == 1 && web.Status.Volumes[0].Mounted
-		return ok, fmt.Sprintf("%+v", web.Status)
-	})
-	t.Logf("web on %s, NodeBalancer %s, volume %s at %s", web.Status.Host, web.Status.Service.LoadBalancerIP, web.Status.Volumes[0].Handle, web.Status.Volumes[0].Device)
-	host := map[string]machine{"w1": w1, "w2": w2}[web.Status.Host]
-	if out, _ := b.SSH(ctx, host, "findmnt -n -o SOURCE,FSTYPE /var/lib/kevaso/volumes/"+web.Metadata.UID+"/site"); !strings.Contains(out, "ext4") {
-		t.Fatalf("volume mount on %s: %q", web.Status.Host, out)
-	}
-	if got := must("", kvo, "exec", "silo", "web", "-n", "e2e", "--", "cat", "/usr/share/nginx/html/index.html"); !strings.Contains(got, "served from a Linode volume") {
-		t.Fatalf("the page on the volume: %q", got)
-	}
-	t.Log("the init step wrote the page onto the Linode volume")
-	if nb {
-		testNodeBalancer(t, web, host, eventually)
-	}
-	if dns {
-		must(ingress, kvo, "apply", "-f", "-")
-		eventually("shop."+zone+" in Linode DNS", 20*time.Minute, func() (bool, string) {
-			addrs, err := lookup(ctx, "shop."+zone)
-			return err == nil && len(addrs) == 1 && addrs[0] == web.Status.Service.LoadBalancerIP, fmt.Sprint(addrs, err)
+		var web siloStatus
+		eventually("web running with its volume and NodeBalancer", 10*time.Minute, func() (bool, string) {
+			web = silo("web")
+			ok := web.Status.Phase == "Running" && (web.Status.Service.LoadBalancerIP != "" || !nb) && len(web.Status.Volumes) == 1 && web.Status.Volumes[0].Mounted
+			return ok, fmt.Sprintf("%+v", web.Status)
 		})
-		t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.LoadBalancerIP)
-		must("", kvo, "delete", "ingress", "shop", "-n", "e2e")
-		// The class is cluster-wide and names e2e (its controller, its hosts): a namespace named from
-		// outside isn't deleted (step 8), so it goes with the DNS part.
-		must("", kvo, "delete", "ingressclass", "linode")
-	}
-
-	// 4b. Two silos sharing one NodeBalancer by name (linode.kevaso.com/nodebalancer: edge), each on
-	// its own port: one address, each port to its own silo; it stays while one is left, and goes
-	// with the last.
-	if nb {
-		testSharedNodeBalancer(t, b, cl.Run, cl.Must, kvo, eventually)
-	}
-
-	// 5. Delete it all: the record, the NodeBalancer and the volume go with them.
-	must("", kvo, "delete", "silo", "web", "-n", "e2e")
-	eventually("web, its NodeBalancer, volume and record gone", 10*time.Minute, func() (bool, string) {
-		_, err := sh("", kvo, "get", "silo", "web", "-n", "e2e")
-		left := b.Remaining(ctx)
-		var cloud []string
-		for _, l := range left {
-			if !strings.HasPrefix(l, "Linode ") && !strings.HasPrefix(l, "domain ") {
-				cloud = append(cloud, l)
-			}
+		t.Logf("web on %s, NodeBalancer %s, volume %s at %s", web.Status.Host, web.Status.Service.LoadBalancerIP, web.Status.Volumes[0].Handle, web.Status.Volumes[0].Device)
+		host := map[string]machine{"w1": w1, "w2": w2}[web.Status.Host]
+		if out, _ := b.SSH(ctx, host, "findmnt -n -o SOURCE,FSTYPE /var/lib/kevaso/volumes/"+web.Metadata.UID+"/site"); !strings.Contains(out, "ext4") {
+			t.Fatalf("volume mount on %s: %q", web.Status.Host, out)
 		}
-		recs := 0
-		if ds, _ := b.API.ListDomains(ctx, nil); len(ds) > 0 {
-			for _, d := range ds {
-				if d.Domain == zone {
-					rs, _ := b.API.ListDomainRecords(ctx, d.ID, nil)
-					for _, r := range rs {
-						if r.Type == linodego.RecordTypeA || r.Type == linodego.RecordTypeTXT {
-							recs++
+		if got := must("", kvo, "exec", "silo", "web", "-n", "e2e", "--", "cat", "/usr/share/nginx/html/index.html"); !strings.Contains(got, "served from a Linode volume") {
+			t.Fatalf("the page on the volume: %q", got)
+		}
+		t.Log("the init step wrote the page onto the Linode volume")
+		if nb {
+			testNodeBalancer(t, web, host, eventually)
+			testNodeBalancerIPv6(t, b, web, eventually)
+		}
+		// 4a. IPv6 in on a worker's own address: a HostPort service, the client's address kept.
+		testHostPortIPv6(t, sh, must, kvo, ext6, workers, eventually)
+		if dns {
+			must(ingress, kvo, "apply", "-f", "-")
+			eventually("shop."+zone+" in Linode DNS", 20*time.Minute, func() (bool, string) {
+				addrs, err := lookup(ctx, "shop."+zone)
+				return err == nil && len(addrs) == 1 && addrs[0] == web.Status.Service.LoadBalancerIP, fmt.Sprint(addrs, err)
+			})
+			t.Logf("shop.%s → %s on ns1.linode.com", zone, web.Status.Service.LoadBalancerIP)
+			must("", kvo, "delete", "ingress", "shop", "-n", "e2e")
+			// The class is cluster-wide and names e2e (its controller, its hosts): a namespace named from
+			// outside isn't deleted (step 8), so it goes with the DNS part.
+			must("", kvo, "delete", "ingressclass", "linode")
+		}
+
+		// 4b. Two silos sharing one NodeBalancer by name (linode.kevaso.com/nodebalancer: edge), each on
+		// its own port: one address, each port to its own silo; it stays while one is left, and goes
+		// with the last.
+		if nb {
+			testSharedNodeBalancer(t, b, cl.Run, cl.Must, kvo, eventually)
+		}
+
+		// 5. Delete it all: the record, the NodeBalancer and the volume go with them.
+		must("", kvo, "delete", "silo", "web", "-n", "e2e")
+		eventually("web, its NodeBalancer, volume and record gone", 10*time.Minute, func() (bool, string) {
+			_, err := sh("", kvo, "get", "silo", "web", "-n", "e2e")
+			left := b.Remaining(ctx)
+			var cloud []string
+			for _, l := range left {
+				if !strings.HasPrefix(l, "Linode ") && !strings.HasPrefix(l, "domain ") {
+					cloud = append(cloud, l)
+				}
+			}
+			recs := 0
+			if ds, _ := b.API.ListDomains(ctx, nil); len(ds) > 0 {
+				for _, d := range ds {
+					if d.Domain == zone {
+						rs, _ := b.API.ListDomainRecords(ctx, d.ID, nil)
+						for _, r := range rs {
+							if r.Type == linodego.RecordTypeA || r.Type == linodego.RecordTypeTXT {
+								recs++
+							}
 						}
 					}
 				}
 			}
+			return err != nil && len(cloud) == 0 && recs == 0, fmt.Sprintf("silo err=%v cloud=%v records=%d", err, cloud, recs)
+		})
+		switch {
+		case nb && dns:
+			t.Log("deleting the silo deleted its NodeBalancer, its volume and its DNS records")
+		case nb:
+			t.Log("deleting the silo deleted its NodeBalancer and its volume")
+		default:
+			t.Log("deleting the silo detached and deleted its volume")
 		}
-		return err != nil && len(cloud) == 0 && recs == 0, fmt.Sprintf("silo err=%v cloud=%v records=%d", err, cloud, recs)
-	})
-	switch {
-	case nb && dns:
-		t.Log("deleting the silo deleted its NodeBalancer, its volume and its DNS records")
-	case nb:
-		t.Log("deleting the silo deleted its NodeBalancer and its volume")
-	default:
-		t.Log("deleting the silo detached and deleted its volume")
+
+		// 5b. No floating IPv6 on Linode: an IPv6 Provider IP is refused at apply, with the reason.
+		testNoFloatingIPv6(t, sh, kvo, b.Region)
+
 	}
 
 	// 6. A Provider IP that follows its silo: an IP of type Provider, a reserved IPv4 in the
@@ -344,7 +365,21 @@ spec:
 	// plane, so it is restarted elsewhere only after its own host reports FenceStopped for its latest
 	// start; a host that is shut down can't report, so nothing starts it on the other worker. A person
 	// runs kvo move silo edge -n e2e --to HOST --confirm-fenced --recreate, and the address answers there.
+	// Its traffic out is checked against api.ipify.org, by address: nothing leaves without a Grant,
+	// and a grant to a name goes through the egress gate (not from the silo's own source), so the
+	// grant opens the name's IPv4 addresses (resolved here) on port 80 and edge asks one by address.
+	ipify := ipv4sOf(t, "api.ipify.org")
+	var ipifyRules strings.Builder
+	for _, a := range ipify {
+		fmt.Fprintf(&ipifyRules, "    - { to: %q, ports: [\"80\"] }\n", a+"/32")
+	}
 	must(`apiVersion: kevaso/v1
+kind: Grant
+metadata: { name: ipify, namespace: e2e }
+spec:
+  egress:
+`+ipifyRules.String()+`---
+apiVersion: kevaso/v1
 kind: IP
 metadata: { name: edge, namespace: e2e }
 spec: { type: Provider, provider: linode, region: `+b.Region+` }
@@ -359,6 +394,7 @@ spec:
     command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
   resources: { cpu: 1, memory: 256Mi }
   availability: { onHostLoss: Recreate, onControlPlaneLoss: Stop, after: 30s }
+  grants: [ipify]
   ports: [{ name: http, port: 80 }]
   services:
     - name: edge
@@ -405,7 +441,7 @@ spec:
 		egressFrom := func(want string) {
 			t.Helper()
 			eventually("edge's traffic out from "+want, 3*time.Minute, func() (bool, string) {
-				out, err := sh("", kvo, "exec", "silo", "edge", "-n", "e2e", "--", "wget", "-qO-", "-T", "10", "http://api.ipify.org")
+				out, err := sh("", kvo, "exec", "silo", "edge", "-n", "e2e", "--", "wget", "-qO-", "-T", "10", "--header", "Host: api.ipify.org", "http://"+ipify[0]+"/")
 				return err == nil && strings.TrimSpace(out) == want, fmt.Sprint(strings.TrimSpace(out), err)
 			})
 		}
@@ -458,6 +494,14 @@ spec:
 		if body, err := get("http://" + addr + "/"); !strings.Contains(body, "edge answers") {
 			t.Fatalf("%s stopped answering when %s came back: %q %v", addr, first, body, err)
 		}
+		// Linode's Network Helper puts the reserved IPv4 assigned to the former holder back on its
+		// eth0 at boot; kevasod takes it off (a host has a Provider IP only where it holds it).
+		eventually(addr+" on none of "+first+"'s interfaces", 3*time.Minute, func() (bool, string) {
+			out, err := b.SSH(ctx, down, "ip -o addr show | grep -F ' "+addr+"/' ; true")
+			return err == nil && strings.TrimSpace(out) == "", strings.TrimSpace(out)
+		})
+		logs, _ := b.SSH(ctx, down, "journalctl -u kevasod --no-pager -b | grep -F 'removed Provider IP "+addr+"' | head -3")
+		t.Logf("%s holds no copy of %s on any interface after its boot (kevasod: %s)", first, addr, strings.TrimSpace(logs))
 		t.Logf("%s is back; %s still answers from edge on %s", first, addr, edge.Status.Host)
 	}
 
@@ -484,7 +528,9 @@ spec:
 
 	// 7. An IPSet of type Dynamic: each SiloSet instance its own Provider IP by ordinal, and
 	// 8. the namespace deleted with everything in it (kvo delete namespace, after its question).
-	testIPSetAndCascade(t, b, cl, kvo, []machine{cp, w1, w2}, nb, eventually, func(a string) { reserved = append(reserved, a) })
+	if !focus {
+		testIPSetAndCascade(t, b, cl, kvo, []machine{cp, w1, w2}, nb, eventually, func(a string) { reserved = append(reserved, a) })
+	}
 }
 
 // sharingRefused waits for IP name's Shared condition: "" once it is shared with its holder's
@@ -919,6 +965,22 @@ func testNodeBalancer(t *testing.T, web siloStatus, host machine, eventually fun
 			t.Fatalf("node port %d answered from the internet: %q", np[0].NodePort, body)
 		}
 	}
+}
+
+// ipv4sOf resolves name's IPv4 addresses here (to grant them by address).
+func ipv4sOf(t *testing.T, name string) []string {
+	t.Helper()
+	ips, err := net.LookupIP(name)
+	var out []string
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			out = append(out, v4.String())
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s has no IPv4 address here: %v", name, err)
+	}
+	return out
 }
 
 func firstLine(s string) string {

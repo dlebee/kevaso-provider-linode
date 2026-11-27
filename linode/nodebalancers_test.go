@@ -61,6 +61,12 @@ func TestNodeBalancerPerService(t *testing.T) {
 	if len(f.nbs) != 2 || a.Address == b.Address {
 		t.Fatalf("two services, one port each: %v (%s, %s)", f.nbs, a.Address, b.Address)
 	}
+	// Each answers on IPv6 too: the status says both (the API's ipv4 and ipv6).
+	for _, st := range []kplugin.LoadBalancerStatus{a, b} {
+		if !strings.HasPrefix(st.Address, "172.233.0.") || !strings.HasPrefix(st.AddressIPv6, "2600:3c04:1::ace9:") {
+			t.Errorf("status %+v: want the NodeBalancer's IPv4 and IPv6", st)
+		}
+	}
 	if got := configsOf(f, NodeBalancerLabel(web.ID)); fmt.Sprint(got) != "[443→192.168.140.7:30000]" {
 		t.Fatalf("web's: %v", got)
 	}
@@ -243,6 +249,26 @@ func TestNodeBalancerRegion(t *testing.T) {
 // refused (out of reach).
 // On an account whose per-Linode IPv4 limit Linode support hasn't raised, the reserved address
 // can't be assigned to the holder's Linode: a conflict naming the fix, not Linode's bare 400.
+// Linode declares no IPv6 Provider IPs, and says why: core refuses one at apply with that reason.
+// Asked anyway (a backstop), nothing is reserved.
+func TestNoIPv6ProviderIPs(t *testing.T) {
+	f, p := newFakeAPI(t)
+	n := Networking()
+	if n.ProviderIPv6 || n.NoProviderIPv6 != "a /64 moves as one unit" || !n.ProviderIPs {
+		t.Fatalf("declared %+v: want IPv4 Provider IPs only, with the reason", n)
+	}
+	if err := n.Check(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.ReserveAddress(ctx, kplugin.AddressReservation{Class: ClassSharedIP, ID: "ip6", Namespace: "d", Name: "edge6", Region: "ca-central", Family: "IPv6"})
+	if !errors.Is(err, kplugin.ErrUnsupported) || !strings.Contains(err.Error(), "linode can't float an IPv6 address: a /64 moves as one unit") {
+		t.Fatalf("IPv6 reservation: %v", err)
+	}
+	if len(f.ips) != 0 {
+		t.Fatalf("reserved something: %v", f.ips)
+	}
+}
+
 func TestProviderIPOverTheIPv4Limit(t *testing.T) {
 	f, p := newFakeAPI(t)
 	f.addLinode(11, "ca-central", "172.105.1.1")

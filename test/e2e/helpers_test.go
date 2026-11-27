@@ -42,7 +42,8 @@ func TestSweep(t *testing.T) {
 }
 
 // TestLeftovers lists (deletes nothing) every kvt- or kevaso-e2e- resource in the account, of any
-// run: what each turn ends with, to show the account is clean.
+// run, and the IPv6 ranges and additional IPv4s that aren't on the account's other Linodes: what
+// each turn ends with, to show the account is clean.
 //
 //	KEVASO_LINODE_TOKEN_FILE=… go test -tags e2e -run TestLeftovers -v ./test/e2e/
 func TestLeftovers(t *testing.T) {
@@ -59,7 +60,12 @@ func TestLeftovers(t *testing.T) {
 	}
 	t.Logf("instances, volumes, NodeBalancers, domains, firewalls, VPCs labelled kvt-/kevaso-e2e-: %d %v", len(left), left)
 	t.Logf("reserved IPv4 addresses in the account: %d", reserved)
-	if len(left) > 0 {
+	extras, others, err := b.Extras(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("IPv6 ranges and additional IPv4s on kvt-/kevaso-e2e- Linodes or on none: %d %v (on the account's other Linodes, untouched: %d)", len(extras), extras, others)
+	if left = append(left, extras...); len(left) > 0 {
 		t.Errorf("left in the account: %v", left)
 	}
 }
