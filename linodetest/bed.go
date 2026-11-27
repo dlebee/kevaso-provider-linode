@@ -1,6 +1,7 @@
 package linodetest
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -542,6 +544,73 @@ func (b *Bed) Leftovers(ctx context.Context) ([]string, int, error) {
 		return r.Lines(), -1, nil // the token may lack the scope
 	}
 	return r.Lines(), len(reserved), nil
+}
+
+// Extras lists, deleting nothing, the account's IPv6 ranges and its Linodes' additional public
+// IPv4s (any beyond a Linode's own first one: assigned or shared to it), neither of which carries
+// a label. Each line names the Linodes it is on. Ours are those on a kvt-/kevaso-e2e- Linode, or
+// on no Linode at all (a range or reservation left behind); the rest belong to the account's other
+// Linodes and are only counted in others.
+func (b *Bed) Extras(ctx context.Context) (ours []string, others int, err error) {
+	ins, err := b.API.ListInstances(ctx, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	label := map[int]string{}
+	for _, in := range ins {
+		label[in.ID] = in.Label
+	}
+	test := func(id int) bool {
+		l, ok := label[id]
+		return !ok || strings.HasPrefix(l, "kvt-") || strings.HasPrefix(l, "kevaso-e2e-")
+	}
+	named := func(ids []int) string {
+		var ns []string
+		for _, id := range ids {
+			ns = append(ns, fmt.Sprintf("%d (%s)", id, cmp.Or(label[id], "gone")))
+		}
+		return strings.Join(ns, ", ")
+	}
+	ranges, err := b.API.ListIPv6Ranges(ctx, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("IPv6 ranges: %w", err)
+	}
+	for _, r := range ranges {
+		got, err := b.API.GetIPv6Range(ctx, r.Range)
+		if err != nil {
+			return nil, 0, fmt.Errorf("IPv6 range %s: %w", r.Range, err)
+		}
+		if len(got.Linodes) > 0 && !slices.ContainsFunc(got.Linodes, test) {
+			others++
+			continue
+		}
+		ours = append(ours, fmt.Sprintf("IPv6 range %s/%d in %s on Linodes [%s]", r.Range, r.Prefix, r.Region, named(got.Linodes)))
+	}
+	ips, err := b.API.ListIPAddresses(ctx, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("IP addresses: %w", err)
+	}
+	public := map[int][]string{} // a Linode's public IPv4s: its own and any more
+	var order []int
+	for _, ip := range ips {
+		if ip.Type != linodego.IPTypeIPv4 || !ip.Public || ip.LinodeID == 0 {
+			continue // reserved and unassigned: counted by Leftovers
+		}
+		if public[ip.LinodeID] == nil {
+			order = append(order, ip.LinodeID)
+		}
+		public[ip.LinodeID] = append(public[ip.LinodeID], ip.Address)
+	}
+	for _, id := range order {
+		switch as := public[id]; {
+		case len(as) < 2:
+		case !test(id):
+			others += len(as) - 1
+		default:
+			ours = append(ours, fmt.Sprintf("Linode %s has %d public IPv4s (one is its own): %s", named([]int{id}), len(as), strings.Join(as, ", ")))
+		}
+	}
+	return ours, others, nil
 }
 
 // Lookup asks Linode's own name server directly (the test zone isn't delegated).

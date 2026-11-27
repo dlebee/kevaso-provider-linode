@@ -212,7 +212,8 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if throttle == nil {
 			throttle = 0
 		}
-		nb := map[string]any{"id": id, "label": body["label"], "region": body["region"], "ipv4": fmt.Sprintf("172.233.0.%d", id%250), "tags": body["tags"],
+		nb := map[string]any{"id": id, "label": body["label"], "region": body["region"], "ipv4": fmt.Sprintf("172.233.0.%d", id%250),
+			"ipv6": fmt.Sprintf("2600:3c04:1::ace9:%x", id%250), "tags": body["tags"],
 			"type": typ, "client_conn_throttle": throttle}
 		f.nbs[id] = nb
 		reply(nb)

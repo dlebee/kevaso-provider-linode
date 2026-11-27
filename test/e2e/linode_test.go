@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -43,8 +44,9 @@ type siloStatus struct {
 		Phase   string `json:"phase"`
 		Host    string `json:"host"`
 		Service struct {
-			LoadBalancerIP string `json:"loadBalancerIP"`
-			NodePorts      []struct {
+			LoadBalancerIP   string `json:"loadBalancerIP"`
+			LoadBalancerIPv6 string `json:"loadBalancerIPv6"`
+			NodePorts        []struct {
 				NodePort int `json:"nodePort"`
 			} `json:"nodePorts"`
 		} `json:"service"`
@@ -188,6 +190,9 @@ func TestLinode(t *testing.T) {
 		}
 		return n == 2, strings.Join(seen, "; ")
 	})
+	// The IPv6 effort: each worker's own IPv6 is found (its SLAAC address).
+	workers := map[string]machine{"w1": w1, "w2": w2}
+	ext6 := testWorkersIPv6(t, b, sh, kvo, workers, eventually)
 
 	// 4. A container silo with a Block Storage volume behind a NodeBalancer, and an Ingress class
 	// publishing its host name in Linode DNS.
@@ -282,7 +287,10 @@ spec:
 	t.Log("the init step wrote the page onto the Linode volume")
 	if nb {
 		testNodeBalancer(t, web, host, eventually)
+		testNodeBalancerIPv6(t, b, web, eventually)
 	}
+	// 4a. IPv6 in on a worker's own address: a HostPort service, the client's address kept.
+	testHostPortIPv6(t, sh, must, kvo, ext6, workers, eventually)
 	if dns {
 		must(ingress, kvo, "apply", "-f", "-")
 		eventually("shop."+zone+" in Linode DNS", 20*time.Minute, func() (bool, string) {
@@ -338,13 +346,30 @@ spec:
 		t.Log("deleting the silo detached and deleted its volume")
 	}
 
+	// 5b. No floating IPv6 on Linode: an IPv6 Provider IP is refused at apply, with the reason.
+	testNoFloatingIPv6(t, sh, kvo, b.Region)
+
 	// 6. A Provider IP that follows its silo: an IP of type Provider, a reserved IPv4 in the
 	// region, shared with the region's Linodes and announced over BGP by the silo's host (a
 	// HostPort service on it). That host is shut down. edge opted in to stop without the control
 	// plane, so it is restarted elsewhere only after its own host reports FenceStopped for its latest
 	// start; a host that is shut down can't report, so nothing starts it on the other worker. A person
 	// runs kvo move silo edge -n e2e --to HOST --confirm-fenced --recreate, and the address answers there.
+	// Its traffic out is checked against api.ipify.org, by address: nothing leaves without a Grant,
+	// and a grant to a name goes through the egress gate (not from the silo's own source), so the
+	// grant opens the name's IPv4 addresses (resolved here) on port 80 and edge asks one by address.
+	ipify := ipv4sOf(t, "api.ipify.org")
+	var ipifyRules strings.Builder
+	for _, a := range ipify {
+		fmt.Fprintf(&ipifyRules, "    - { to: %q, ports: [\"80\"] }\n", a+"/32")
+	}
 	must(`apiVersion: kevaso/v1
+kind: Grant
+metadata: { name: ipify, namespace: e2e }
+spec:
+  egress:
+`+ipifyRules.String()+`---
+apiVersion: kevaso/v1
 kind: IP
 metadata: { name: edge, namespace: e2e }
 spec: { type: Provider, provider: linode, region: `+b.Region+` }
@@ -359,6 +384,7 @@ spec:
     command: [sh, -c, "echo edge answers > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'"]
   resources: { cpu: 1, memory: 256Mi }
   availability: { onHostLoss: Recreate, onControlPlaneLoss: Stop, after: 30s }
+  grants: [ipify]
   ports: [{ name: http, port: 80 }]
   services:
     - name: edge
@@ -405,7 +431,7 @@ spec:
 		egressFrom := func(want string) {
 			t.Helper()
 			eventually("edge's traffic out from "+want, 3*time.Minute, func() (bool, string) {
-				out, err := sh("", kvo, "exec", "silo", "edge", "-n", "e2e", "--", "wget", "-qO-", "-T", "10", "http://api.ipify.org")
+				out, err := sh("", kvo, "exec", "silo", "edge", "-n", "e2e", "--", "wget", "-qO-", "-T", "10", "--header", "Host: api.ipify.org", "http://"+ipify[0]+"/")
 				return err == nil && strings.TrimSpace(out) == want, fmt.Sprint(strings.TrimSpace(out), err)
 			})
 		}
@@ -919,6 +945,22 @@ func testNodeBalancer(t *testing.T, web siloStatus, host machine, eventually fun
 			t.Fatalf("node port %d answered from the internet: %q", np[0].NodePort, body)
 		}
 	}
+}
+
+// ipv4sOf resolves name's IPv4 addresses here (to grant them by address).
+func ipv4sOf(t *testing.T, name string) []string {
+	t.Helper()
+	ips, err := net.LookupIP(name)
+	var out []string
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			out = append(out, v4.String())
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s has no IPv4 address here: %v", name, err)
+	}
+	return out
 }
 
 func firstLine(s string) string {

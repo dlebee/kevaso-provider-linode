@@ -382,7 +382,11 @@ func (p *Provider) ensureOn(ctx context.Context, lb kplugin.LoadBalancer, k knob
 	if nb.IPv4 == nil || *nb.IPv4 == "" {
 		return kplugin.LoadBalancerStatus{}, fmt.Errorf("%s has no IPv4 yet: %w", what, kplugin.ErrInProgress)
 	}
-	return kplugin.LoadBalancerStatus{Address: *nb.IPv4, SourceRanges: []string{NodeBalancerSources}}, nil
+	st := kplugin.LoadBalancerStatus{Address: *nb.IPv4, SourceRanges: []string{NodeBalancerSources}}
+	if nb.IPv6 != nil {
+		st.AddressIPv6 = *nb.IPv6 // a NodeBalancer answers on IPv6 too, to backends on private IPv4 (E053)
+	}
+	return st, nil
 }
 
 func hasPort(lb kplugin.LoadBalancer, port int) bool {

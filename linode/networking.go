@@ -35,6 +35,9 @@ const (
 	KeyCheckAttempts = "check-attempts"
 )
 
+// NoProviderIPv6 is why an IPv6 Provider IP is refused on Linode (core says it with the ways that work).
+const NoProviderIPv6 = "a /64 moves as one unit"
+
 // Shared NodeBalancer names: its label is kvo-NAME-HASH (32 characters at most).
 const sharedNamePattern = `[a-z0-9]([a-z0-9-]{0,17}[a-z0-9])?`
 
@@ -44,11 +47,14 @@ func i64(n int64) *int64 { return &n }
 // (reserved in a region, announced over BGP by the silo's Linode, so only in regions with BGP
 // failover); load balancers are NodeBalancers, which have their own address (no kept IP in front)
 // and keep the client's address only with PROXY protocol. Both reach the silo within one region,
-// on the account's Linodes only.
+// on the account's Linodes only. Provider IPs are IPv4 only: Linode gives extra IPv6 only as /64
+// ranges, and a range moves between Linodes as one unit, so one IPv6 address can't follow one silo
+// (research E052, E054). NodeBalancers answer on IPv6 too (their status says both addresses).
 func Networking() *kplugin.Networking {
 	svc := []string{kplugin.OnService}
 	return &kplugin.Networking{
 		ProviderIPs: true, LoadBalancers: true, FrontWithIP: false, KeepsClientIP: true,
+		ProviderIPv6: false, NoProviderIPv6: NoProviderIPv6,
 		Reach: kplugin.FollowsRegion, Regions: dcid.Regions(), OwnHostsOnly: true,
 		Annotations: []kplugin.Annotation{
 			{Key: KeyNodeBalancer, Description: "share one NodeBalancer by name with the namespace's other services naming it (each on its own ports); default: one per service", Pattern: sharedNamePattern, On: svc},
